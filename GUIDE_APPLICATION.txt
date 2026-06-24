@@ -1,0 +1,149 @@
+══════════════════════════════════════════════════════════════
+ CORRECTIONS PRIX SPÉCIAUX — GUIDE D'APPLICATION
+══════════════════════════════════════════════════════════════
+
+FICHIER 1 : main.py (gestion_stock.py)
+───────────────────────────────────────
+
+┌─ CORRECTION 1 (init_db) ──────────────────────────────────┐
+│ Dans CREATE TABLE IF NOT EXISTS prix_speciaux_clients,     │
+│ ajouter la colonne :                                       │
+│     date_modification TEXT,                                │
+│ (avant la ligne FOREIGN KEY(client_id)...)                 │
+│                                                            │
+│ Puis après les ALTER TABLE existants, ajouter :            │
+│     c.execute("PRAGMA table_info(prix_speciaux_clients)")  │
+│     psc_cols = [row[1] for row in c.fetchall()]            │
+│     if "date_modification" not in psc_cols:                │
+│         c.execute("ALTER TABLE prix_speciaux_clients "     │
+│                   "ADD COLUMN date_modification TEXT")     │
+└────────────────────────────────────────────────────────────┘
+
+┌─ CORRECTION 2 (PrixSpeciauxClientDialog.refresh) ─────────┐
+│ Remplacer :                                                │
+│     pr.prix_detail as prix_standard                       │
+│ par :                                                      │
+│     COALESCE(NULLIF(pr.prix_vente,0),pr.prix_detail,0)    │
+│         as prix_standard                                   │
+│                                                            │
+│ Et remplacer le calcul de remise par :                     │
+│     prix_std = ps["prix_standard"] or 0                   │
+│     remise = ((prix_std - ps["prix_special"])              │
+│               / prix_std * 100) if prix_std > 0 else 0    │
+└────────────────────────────────────────────────────────────┘
+
+┌─ CORRECTION 3 (ajouter_prix_special UPDATE) ──────────────┐
+│ Remplacer :                                                │
+│     SET prix_special = ?, date_modification = ...         │
+│ par :                                                      │
+│     SET prix_special = ?,                                  │
+│         date_modification = datetime('now')               │
+└────────────────────────────────────────────────────────────┘
+
+┌─ CORRECTION 4 (VenteComptoirDialog._build) ───────────────┐
+│ DÉPLACER self.prix_var = tk.StringVar() AVANT              │
+│ l'instanciation de PrixSelectorWidget.                     │
+│                                                            │
+│ Ordre correct :                                            │
+│   1. qty_frame + self.qty_var                              │
+│   2. self.prix_var = tk.StringVar()                        │
+│   3. entry(... textvariable=self.prix_var ...)             │
+│   4. self.prix_selector = PrixSelectorWidget(              │
+│          ..., prix_var=self.prix_var, ...)                 │
+└────────────────────────────────────────────────────────────┘
+
+┌─ CORRECTION 5 (on_tiers_change dans BonDialog) ───────────┐
+│ Remplacer la méthode par :                                 │
+│                                                            │
+│     def on_tiers_change(self, event=None):                 │
+│         if hasattr(self, 'prix_selector'):                 │
+│             key = self.prod_var.get()                      │
+│             if key and key in self.prod_map:               │
+│                 self.prix_selector.set_produit(            │
+│                     self.prod_map[key])                    │
+│             else:                                          │
+│                 self.prix_selector._selectionner_defaut()  │
+│                 self.prix_selector._afficher_prix()        │
+└────────────────────────────────────────────────────────────┘
+
+┌─ CORRECTION 6 (VenteComptoir: client change) ─────────────┐
+│ Après creation du client_combo, ajouter :                  │
+│     self.client_combo.bind("<<ComboboxSelected>>",         │
+│                             self._on_client_change)        │
+│                                                            │
+│ Ajouter la méthode dans VenteComptoirDialog :              │
+│     def _on_client_change(self, event=None):               │
+│         key = self.prod_var.get()                          │
+│         if key and key in self.prod_map:                   │
+│             if hasattr(self, 'prix_selector'):             │
+│                 self.prix_selector.set_produit(            │
+│                     self.prod_map[key])                    │
+└────────────────────────────────────────────────────────────┘
+
+
+FICHIER 2 : prix_niveaux.py
+────────────────────────────
+
+┌─ CORRECTION 7 (PrixSelectorWidget.__init__) ──────────────┐
+│ Vérifier que client_id_fn est bien stocké :               │
+│     self._client_id_fn = client_id_fn                     │
+│     self._produit = None                                   │
+└────────────────────────────────────────────────────────────┘
+
+┌─ CORRECTION 8 (nouvelle méthode) ─────────────────────────┐
+│ Ajouter dans PrixSelectorWidget :                          │
+│                                                            │
+│ def _get_prix_special_client(self, produit_id):            │
+│     if not self._client_id_fn:                             │
+│         return None                                        │
+│     try:                                                   │
+│         client_id = self._client_id_fn()                  │
+│     except Exception:                                      │
+│         return None                                        │
+│     if not client_id or not produit_id:                    │
+│         return None                                        │
+│     try:                                                   │
+│         conn = get_conn()                                  │
+│         row = conn.execute("""                             │
+│             SELECT prix_special                            │
+│             FROM prix_speciaux_clients                     │
+│             WHERE client_id=? AND produit_id=?             │
+│               AND actif=1                                  │
+│         """, (client_id, produit_id)).fetchone()           │
+│         conn.close()                                       │
+│         return float(row["prix_special"]) if row else None │
+│     except Exception:                                      │
+│         return None                                        │
+└────────────────────────────────────────────────────────────┘
+
+┌─ CORRECTION 9 (modifier set_produit) ─────────────────────┐
+│ Modifier set_produit() pour tester le prix spécial         │
+│ EN PREMIER, avant la sélection du niveau standard :        │
+│                                                            │
+│ def set_produit(self, produit):                            │
+│     self._produit = produit                                │
+│     prix_special = self._get_prix_special_client(          │
+│                        produit.get("id"))                  │
+│     if prix_special is not None:                           │
+│         if self._prix_var:                                 │
+│             self._prix_var.set(str(prix_special))          │
+│         # Affichage optionnel d'un badge visuel            │
+│         return                                             │
+│     # Comportement standard                               │
+│     self._selectionner_defaut()                            │
+│     self._afficher_prix()                                  │
+└────────────────────────────────────────────────────────────┘
+
+
+ORDRE D'APPLICATION RECOMMANDÉ
+───────────────────────────────
+ 1. prix_niveaux.py  → corrections 7, 8, 9
+ 2. main.py          → corrections 1, 2, 3, 4, 5, 6
+
+TESTER AVEC :
+ - Créer un client "Test"
+ - Lui attribuer un prix spécial sur un produit
+ - Ouvrir Vente Comptoir, sélectionner ce client
+ - Sélectionner ce produit → le prix doit s'afficher automatiquement
+ - Idem dans Bon de Vente
+══════════════════════════════════════════════════════════════
