@@ -8,7 +8,7 @@ Produits, Clients, Fournisseurs, Achats, Ventes, Versements, Retours, Factures
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, filedialog
 import sqlite3
-from datetime import datetime, date
+from datetime import datetime, timedelta, date
 import os
 import sys
 import random
@@ -23,12 +23,12 @@ import tempfile
 import subprocess
 import shutil
 import calendar
-from datetime import datetime, timedelta, date
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import prix_niveaux
 # Désactiver les warnings de dépréciation
 import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+import html_renderer as hr  
 
 # ========== CHEMINS ==========
 def get_db_path():
@@ -857,6 +857,13 @@ def init_db():
         if "niveau_prix" not in clients_cols:
             c.execute("ALTER TABLE clients ADD COLUMN niveau_prix TEXT DEFAULT 'detail'")
             print("✅ Colonne 'niveau_prix' ajoutée à la table clients")
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS clients_niveau_prix (
+                client_id   INTEGER PRIMARY KEY,
+                niveau      TEXT DEFAULT 'detail',
+                FOREIGN KEY(client_id) REFERENCES clients(id)
+            )
+        """)
         # Vérifier et ajouter les colonnes pour le PMP
         c.execute("PRAGMA table_info(produits)")
         cols = [row[1] for row in c.fetchall()]
@@ -947,6 +954,31 @@ def recalculer_cout_stock_apres_sortie(conn, produit_id, quantite_sortie):
         "UPDATE produits SET cout_total_stock = ? WHERE id=?",
         (nouveau_cout, produit_id)
     )
+
+def inverser_stock_achat(conn, lignes):
+    """Annule l'effet stock/PMP d'un bon d'achat (suppression ou annulation)."""
+    for l in lignes:
+        recalculer_cout_stock_apres_sortie(conn, l["produit_id"], l["quantite"])
+        conn.execute(
+            "UPDATE produits SET stock_actuel = stock_actuel - ? WHERE id=?",
+            (l["quantite"], l["produit_id"])
+        )
+        produit = conn.execute(
+            "SELECT stock_actuel, cout_total_stock FROM produits WHERE id=?",
+            (l["produit_id"],)
+        ).fetchone()
+        if produit["stock_actuel"] > 0:
+            nouveau_pmp = produit["cout_total_stock"] / produit["stock_actuel"]
+            conn.execute(
+                "UPDATE produits SET prix_moyen_pondere = ? WHERE id=?",
+                (nouveau_pmp, l["produit_id"])
+            )
+        else:
+            conn.execute(
+                "UPDATE produits SET prix_moyen_pondere = 0, cout_total_stock = 0 WHERE id=?",
+                (l["produit_id"],)
+            )
+
 class PrixSpeciauxClientDialog(tk.Toplevel):
     """Dialogue pour gérer les prix spéciaux d'un client spécifique"""
     
@@ -1105,8 +1137,7 @@ class PrixSpeciauxClientDialog(tk.Toplevel):
                 conn.rollback()
             finally:
                 conn.close()
-import calendar
-from datetime import datetime, timedelta, date
+
 
 class DatePicker(tk.Toplevel):
     """Fenêtre de sélection de date avec calendrier"""
@@ -1140,7 +1171,7 @@ class DatePicker(tk.Toplevel):
         try:
             datetime.strptime(date_str, "%Y-%m-%d")
             return True
-        except:
+        except ValueError:
             return False
     
     def _build(self):
@@ -1336,7 +1367,1037 @@ class DateEntry(tk.Frame):
                 datetime.strptime(date_str, "%Y-%m-%d")
             except ValueError:
                 # Si la date est invalide, effacer
-                self.date_var.set("")                
+                self.date_var.set("")     
+class StatistiquesAchatsPage(tk.Frame):
+    """Page de statistiques des achats avec filtres par fournisseur, produit et période"""
+    
+    def __init__(self, parent):
+        super().__init__(parent, bg=CLR_BG)
+        self._build()
+        self.refresh()
+    
+    def _build(self):
+        # En-tête
+        hdr = tk.Frame(self, bg=CLR_BG)
+        hdr.pack(fill="x", padx=20, pady=(20,10))
+        lbl(hdr, "📊 Statistiques des Achats par Fournisseur & Produit", 16, True).pack(side="left")
+        
+        # ========== FILTRES ==========
+        filter_frame = tk.LabelFrame(self, text="🔍 Filtres", 
+                                     bg=CLR_CARD, fg=CLR_ACCENT, 
+                                     font=("Segoe UI", 10, "bold"),
+                                     padx=15, pady=10)
+        filter_frame.pack(fill="x", padx=20, pady=10)
+        
+        # Ligne 1: Fournisseur
+        row1 = tk.Frame(filter_frame, bg=CLR_CARD)
+        row1.pack(fill="x", pady=5)
+        
+        lbl(row1, "🏭 Fournisseur:", 9, False, CLR_MUTED).pack(side="left", padx=5)
+        
+        conn = get_conn()
+        fournisseurs = conn.execute("SELECT id, nom FROM fournisseurs ORDER BY nom").fetchall()
+        conn.close()
+        
+        self.fournisseurs_map = {f["nom"]: f["id"] for f in fournisseurs}
+        fournisseur_liste = ["Tous"] + list(self.fournisseurs_map.keys())
+        
+        self.fournisseur_var = tk.StringVar(value="Tous")
+        fournisseur_combo = combo(row1, fournisseur_liste, width=25, textvariable=self.fournisseur_var)
+        fournisseur_combo.pack(side="left", padx=10)
+        fournisseur_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
+        
+        # Ligne 2: Produit
+        row2 = tk.Frame(filter_frame, bg=CLR_CARD)
+        row2.pack(fill="x", pady=5)
+        
+        lbl(row2, "📦 Produit:", 9, False, CLR_MUTED).pack(side="left", padx=5)
+        
+        conn = get_conn()
+        produits = conn.execute("""
+            SELECT id, code, designation, unite, facteur_conversion, tva
+            FROM produits WHERE actif = 1 ORDER BY designation
+        """).fetchall()
+        conn.close()
+        
+        self.produits_map = {f"{p['code']} - {p['designation']}": dict(p) for p in produits}
+        produit_liste = ["Tous"] + list(self.produits_map.keys())
+        
+        self.produit_var = tk.StringVar(value="Tous")
+        produit_combo = combo(row2, produit_liste, width=35, textvariable=self.produit_var)
+        produit_combo.pack(side="left", padx=10)
+        produit_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
+        
+        # Ligne 3: Période
+        row3 = tk.Frame(filter_frame, bg=CLR_CARD)
+        row3.pack(fill="x", pady=5)
+        
+        lbl(row3, "📅 Du:", 9, False, CLR_MUTED).pack(side="left", padx=5)
+        self.date_debut_var = tk.StringVar(value=date.today().replace(day=1).strftime("%Y-%m-%d"))
+        entry(row3, width=12, textvariable=self.date_debut_var).pack(side="left", padx=5)
+        
+        lbl(row3, "Au:", 9, False, CLR_MUTED).pack(side="left", padx=5)
+        self.date_fin_var = tk.StringVar(value=date.today().strftime("%Y-%m-%d"))
+        entry(row3, width=12, textvariable=self.date_fin_var).pack(side="left", padx=5)
+        
+        tk.Button(row3, text="📊 Appliquer", command=self.refresh,
+                 bg=CLR_GREEN, fg="white", relief="flat", 
+                 font=("Segoe UI", 9, "bold"), padx=12, pady=4,
+                 cursor="hand2").pack(side="left", padx=20)
+        
+        # Ligne 4: Options d'affichage
+        row4 = tk.Frame(filter_frame, bg=CLR_CARD)
+        row4.pack(fill="x", pady=5)
+        
+        lbl(row4, "📊 Affichage:", 9, False, CLR_MUTED).pack(side="left", padx=5)
+        self.affichage_var = tk.StringVar(value="Par Fournisseur")
+        affichage_combo = combo(row4, ["Par Fournisseur", "Par Produit", "Détail Fournisseur-Produit"], 
+                               width=20, textvariable=self.affichage_var)
+        affichage_combo.pack(side="left", padx=10)
+        affichage_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
+        
+        lbl(row4, "📦 Unités:", 9, False, CLR_MUTED).pack(side="left", padx=(20,5))
+        self.unite_var = tk.StringVar(value="cartons")
+        unite_combo = combo(row4, ["cartons", "unités", "les deux"], width=10, 
+                           textvariable=self.unite_var)
+        unite_combo.pack(side="left", padx=10)
+        unite_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
+        
+        # Boutons d'action
+        btn_frame = tk.Frame(filter_frame, bg=CLR_CARD)
+        btn_frame.pack(fill="x", pady=5)
+        
+        tk.Button(btn_frame, text="🖨 Imprimer", command=self.print_stats,
+                 bg=CLR_ACCENT, fg="white", relief="flat", 
+                 font=("Segoe UI", 9, "bold"), padx=12, pady=4,
+                 cursor="hand2").pack(side="left", padx=5)
+        
+        tk.Button(btn_frame, text="📥 Exporter CSV", command=self.export_stats_csv,
+                 bg=CLR_ORANGE, fg="white", relief="flat", 
+                 font=("Segoe UI", 9, "bold"), padx=12, pady=4,
+                 cursor="hand2").pack(side="left", padx=5)
+        
+        tk.Button(btn_frame, text="📄 Exporter HTML", command=self.export_stats_html,
+                 bg=CLR_GREEN, fg="white", relief="flat", 
+                 font=("Segoe UI", 9, "bold"), padx=12, pady=4,
+                 cursor="hand2").pack(side="left", padx=5)
+        
+        # ========== TABLEAU DES RÉSULTATS ==========
+        cols = ["Fournisseur", "Produit", "TVA", "Qté Cartons", "Qté Unités", "Total HT", "Total TTC", "% du CA"]
+        widths = [180, 180, 50, 100, 100, 120, 120, 80]
+        tf, self.tree = make_tree(self, cols, widths)
+        tf.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        # ========== RÉCAPITULATIF ==========
+        recap_frame = tk.Frame(self, bg=CLR_CARD, padx=15, pady=10)
+        recap_frame.pack(fill="x", padx=20, pady=10)
+        
+        lbl(recap_frame, "📊 RÉCAPITULATIF DES ACHATS", 11, True, CLR_ACCENT).pack(anchor="w", pady=(0,5))
+        tk.Frame(recap_frame, bg=CLR_BORDER, height=1).pack(fill="x", pady=5)
+        
+        totals_frame = tk.Frame(recap_frame, bg=CLR_CARD)
+        totals_frame.pack(fill="x", pady=5)
+        
+        lbl(totals_frame, "Total Cartons:", 10, True, CLR_MUTED).pack(side="left", padx=(10,5))
+        self.total_cartons_var = tk.StringVar(value="0.00")
+        tk.Label(totals_frame, textvariable=self.total_cartons_var, bg=CLR_CARD, 
+                fg=CLR_ORANGE, font=("Segoe UI", 11, "bold")).pack(side="left", padx=(0,20))
+        
+        lbl(totals_frame, "Total Unités:", 10, True, CLR_MUTED).pack(side="left", padx=(10,5))
+        self.total_unites_var = tk.StringVar(value="0.00")
+        tk.Label(totals_frame, textvariable=self.total_unites_var, bg=CLR_CARD, 
+                fg=CLR_ACCENT, font=("Segoe UI", 11, "bold")).pack(side="left", padx=(0,20))
+        
+        lbl(totals_frame, "Total Achats HT:", 10, True, CLR_MUTED).pack(side="left", padx=(10,5))
+        self.total_ca_var = tk.StringVar(value="0.00 DA")
+        tk.Label(totals_frame, textvariable=self.total_ca_var, bg=CLR_CARD, 
+                fg=CLR_GREEN, font=("Segoe UI", 13, "bold")).pack(side="left", padx=(0,20))
+        
+        lbl(totals_frame, "Lignes:", 10, True, CLR_MUTED).pack(side="left", padx=(10,5))
+        self.nb_lignes_var = tk.StringVar(value="0")
+        tk.Label(totals_frame, textvariable=self.nb_lignes_var, bg=CLR_CARD, 
+                fg=CLR_TEXT, font=("Segoe UI", 11, "bold")).pack(side="left", padx=(0,20))
+    
+    def get_stats(self):
+        """Récupère les statistiques des achats selon les filtres"""
+        conn = get_conn()
+        
+        fournisseur_filter = self.fournisseur_var.get()
+        produit_filter = self.produit_var.get()
+        date_debut = self.date_debut_var.get()
+        date_fin = self.date_fin_var.get()
+        
+        query = """
+            SELECT 
+                f.id as fournisseur_id,
+                f.nom as fournisseur_nom,
+                p.id as produit_id,
+                p.code as produit_code,
+                p.designation as produit_designation,
+                p.unite as produit_unite,
+                p.facteur_conversion,
+                p.tva as produit_tva,
+                COUNT(DISTINCT ba.id) as nb_bons,
+                COALESCE(SUM(la.quantite), 0) as total_unites,
+                COALESCE(SUM(la.quantite / NULLIF(p.facteur_conversion, 0)), 0) as total_cartons,
+                COALESCE(SUM(la.total_ht), 0) as total_ht
+            FROM bons_achat ba
+            JOIN fournisseurs f ON ba.fournisseur_id = f.id
+            JOIN lignes_achat la ON ba.id = la.bon_id
+            JOIN produits p ON la.produit_id = p.id
+            WHERE ba.statut = 'Validé'
+        """
+        
+        params = []
+        
+        if fournisseur_filter != "Tous" and fournisseur_filter in self.fournisseurs_map:
+            query += " AND f.id = ?"
+            params.append(self.fournisseurs_map[fournisseur_filter])
+        
+        if produit_filter != "Tous" and produit_filter in self.produits_map:
+            query += " AND p.id = ?"
+            params.append(self.produits_map[produit_filter]["id"])
+        
+        if date_debut and date_fin:
+            query += " AND ba.date_bon BETWEEN ? AND ?"
+            params.extend([date_debut, date_fin])
+        
+        query += """ GROUP BY f.id, f.nom, p.id, p.code, p.designation, p.unite, p.facteur_conversion, p.tva
+                    ORDER BY f.nom, total_cartons DESC"""
+        
+        rows = conn.execute(query, params).fetchall()
+        conn.close()
+        
+        return rows
+    
+    def refresh(self):
+        """Rafraîchit l'affichage selon le mode sélectionné"""
+        self.tree.delete(*self.tree.get_children())
+        
+        rows = self.get_stats()
+        
+        if not rows:
+            self.total_cartons_var.set("0.00")
+            self.total_unites_var.set("0.00")
+            self.total_ca_var.set("0.00 DA")
+            self.nb_lignes_var.set("0")
+            return
+        
+        # ✅ Convertir les rows en dictionnaires modifiables
+        rows = [dict(row) for row in rows]
+        
+        mode = self.affichage_var.get()
+        unite_mode = self.unite_var.get()
+        
+        total_cartons = 0
+        total_unites = 0
+        total_ca = 0
+        
+        if mode == "Par Fournisseur":
+            fournisseurs_data = {}
+            for r in rows:
+                fournisseur_id = r["fournisseur_id"]
+                if fournisseur_id not in fournisseurs_data:
+                    fournisseurs_data[fournisseur_id] = {
+                        "fournisseur_nom": r["fournisseur_nom"],
+                        "total_cartons": 0,
+                        "total_unites": 0,
+                        "total_ht": 0,
+                        "total_ttc": 0,
+                        "nb_bons": 0,
+                        "produits": []
+                    }
+                
+                tva_taux = r.get("produit_tva") or 0
+                ttc_produit = r["total_ht"] * (1 + tva_taux / 100)
+                
+                fournisseurs_data[fournisseur_id]["total_cartons"] += r["total_cartons"]
+                fournisseurs_data[fournisseur_id]["total_unites"] += r["total_unites"]
+                fournisseurs_data[fournisseur_id]["total_ht"] += r["total_ht"]
+                fournisseurs_data[fournisseur_id]["total_ttc"] += ttc_produit
+                fournisseurs_data[fournisseur_id]["nb_bons"] += r["nb_bons"]
+                
+                r_dict = {
+                    "produit_id": r["produit_id"],
+                    "produit_designation": r["produit_designation"],
+                    "total_cartons": r["total_cartons"],
+                    "total_unites": r["total_unites"],
+                    "total_ht": r["total_ht"],
+                    "ttc": ttc_produit,
+                    "tva_taux": tva_taux,
+                    "nb_bons": r["nb_bons"]
+                }
+                fournisseurs_data[fournisseur_id]["produits"].append(r_dict)
+            
+            for fournisseur_id, data in fournisseurs_data.items():
+                total_cartons += data["total_cartons"]
+                total_unites += data["total_unites"]
+                total_ca += data["total_ht"]
+                
+                qte_cartons = f"{data['total_cartons']:.2f}" if unite_mode in ["cartons", "les deux"] else "-"
+                qte_unites = f"{data['total_unites']:.2f}" if unite_mode in ["unités", "les deux"] else "-"
+                
+                self.tree.insert("", "end", iid=f"fournisseur_{fournisseur_id}", values=(
+                    data["fournisseur_nom"],
+                    f"{len(data['produits'])} produits",
+                    "",
+                    qte_cartons,
+                    qte_unites,
+                    f"{data['total_ht']:,.2f} DA",
+                    f"{data['total_ttc']:,.2f} DA",
+                    ""
+                ), tags=("fournisseur_row",))
+                
+                for r_dict in data["produits"]:
+                    qte_cartons_prod = f"{r_dict['total_cartons']:.2f}" if unite_mode in ["cartons", "les deux"] else "-"
+                    qte_unites_prod = f"{r_dict['total_unites']:.2f}" if unite_mode in ["unités", "les deux"] else "-"
+                    
+                    pct = (r_dict['total_ht'] / data['total_ht'] * 100) if data['total_ht'] > 0 else 0
+                    tva_affichage = f"{r_dict['tva_taux']:.0f}%"
+                    
+                    self.tree.insert("", "end", iid=f"fournisseur_{fournisseur_id}_prod_{r_dict['produit_id']}", values=(
+                        "  └ " + r_dict["produit_designation"],
+                        f"{r_dict['nb_bons']} bons",
+                        tva_affichage,
+                        qte_cartons_prod,
+                        qte_unites_prod,
+                        f"{r_dict['total_ht']:,.2f} DA",
+                        f"{r_dict['ttc']:,.2f} DA",
+                        f"{pct:.1f}%"
+                    ), tags=("detail_row",))
+            
+            self.tree.tag_configure("fournisseur_row", foreground=CLR_ACCENT, font=("Segoe UI", 9, "bold"))
+            self.tree.tag_configure("detail_row", foreground=CLR_TEXT)
+            
+        elif mode == "Par Produit":
+            produits_data = {}
+            for r in rows:
+                produit_id = r["produit_id"]
+                if produit_id not in produits_data:
+                    tva_taux = r.get("produit_tva") or 0
+                    produits_data[produit_id] = {
+                        "produit_designation": r["produit_designation"],
+                        "produit_code": r["produit_code"],
+                        "total_cartons": 0,
+                        "total_unites": 0,
+                        "total_ht": 0,
+                        "total_ttc": 0,
+                        "nb_bons": 0,
+                        "tva_taux": tva_taux,
+                        "fournisseurs": []
+                    }
+                
+                ttc_produit = r["total_ht"] * (1 + produits_data[produit_id]["tva_taux"] / 100)
+                produits_data[produit_id]["total_cartons"] += r["total_cartons"]
+                produits_data[produit_id]["total_unites"] += r["total_unites"]
+                produits_data[produit_id]["total_ht"] += r["total_ht"]
+                produits_data[produit_id]["total_ttc"] += ttc_produit
+                produits_data[produit_id]["nb_bons"] += r["nb_bons"]
+                
+                r_dict = {
+                    "fournisseur_id": r["fournisseur_id"],
+                    "fournisseur_nom": r["fournisseur_nom"],
+                    "total_cartons": r["total_cartons"],
+                    "total_unites": r["total_unites"],
+                    "total_ht": r["total_ht"],
+                    "ttc": ttc_produit,
+                    "nb_bons": r["nb_bons"]
+                }
+                produits_data[produit_id]["fournisseurs"].append(r_dict)
+            
+            for produit_id, data in produits_data.items():
+                total_cartons += data["total_cartons"]
+                total_unites += data["total_unites"]
+                total_ca += data["total_ht"]
+                
+                qte_cartons = f"{data['total_cartons']:.2f}" if unite_mode in ["cartons", "les deux"] else "-"
+                qte_unites = f"{data['total_unites']:.2f}" if unite_mode in ["unités", "les deux"] else "-"
+                tva_affichage = f"{data['tva_taux']:.0f}%"
+                
+                self.tree.insert("", "end", iid=f"produit_{produit_id}", values=(
+                    data["produit_designation"],
+                    f"{len(data['fournisseurs'])} fournisseurs",
+                    tva_affichage,
+                    qte_cartons,
+                    qte_unites,
+                    f"{data['total_ht']:,.2f} DA",
+                    f"{data['total_ttc']:,.2f} DA",
+                    ""
+                ), tags=("produit_row",))
+                
+                for r_dict in data["fournisseurs"]:
+                    qte_cartons_fourn = f"{r_dict['total_cartons']:.2f}" if unite_mode in ["cartons", "les deux"] else "-"
+                    qte_unites_fourn = f"{r_dict['total_unites']:.2f}" if unite_mode in ["unités", "les deux"] else "-"
+                    
+                    pct = (r_dict['total_ht'] / data['total_ht'] * 100) if data['total_ht'] > 0 else 0
+                    
+                    self.tree.insert("", "end", iid=f"produit_{produit_id}_fourn_{r_dict['fournisseur_id']}", values=(
+                        "  └ " + r_dict["fournisseur_nom"],
+                        f"{r_dict['nb_bons']} bons",
+                        "",
+                        qte_cartons_fourn,
+                        qte_unites_fourn,
+                        f"{r_dict['total_ht']:,.2f} DA",
+                        f"{r_dict['ttc']:,.2f} DA",
+                        f"{pct:.1f}%"
+                    ), tags=("detail_row",))
+            
+            self.tree.tag_configure("produit_row", foreground=CLR_GREEN, font=("Segoe UI", 9, "bold"))
+            self.tree.tag_configure("detail_row", foreground=CLR_TEXT)
+            
+        else:  # Détail Fournisseur-Produit
+            for r in rows:
+                total_cartons += r["total_cartons"]
+                total_unites += r["total_unites"]
+                total_ca += r["total_ht"]
+                
+                tva_taux = r.get("produit_tva") or 0
+                ttc = r["total_ht"] * (1 + tva_taux / 100)
+                
+                qte_cartons = f"{r['total_cartons']:.2f}" if unite_mode in ["cartons", "les deux"] else "-"
+                qte_unites = f"{r['total_unites']:.2f}" if unite_mode in ["unités", "les deux"] else "-"
+                tva_affichage = f"{tva_taux:.0f}%"
+                
+                self.tree.insert("", "end", iid=f"detail_{r['fournisseur_id']}_{r['produit_id']}", values=(
+                    r["fournisseur_nom"],
+                    r["produit_designation"],
+                    tva_affichage,
+                    qte_cartons,
+                    qte_unites,
+                    f"{r['total_ht']:,.2f} DA",
+                    f"{ttc:,.2f} DA",
+                    ""
+                ))
+        
+        self.total_cartons_var.set(f"{total_cartons:.2f}")
+        self.total_unites_var.set(f"{total_unites:.2f}")
+        self.total_ca_var.set(f"{total_ca:,.2f} DA")
+        self.nb_lignes_var.set(str(len(self.tree.get_children())))
+    
+    def print_stats(self):
+        """Imprime les statistiques"""
+        data = []
+        for item in self.tree.get_children():
+            values = self.tree.item(item)["values"]
+            data.append(values)
+        
+        if not data:
+            messagebox.showwarning("Avertissement", "Aucune donnée à imprimer")
+            return
+        
+        headers = ["Fournisseur", "Produit", "TVA", "Qté Cartons", "Qté Unités", "Total HT", "Total TTC", "% du CA"]
+        
+        fournisseur_filter = self.fournisseur_var.get()
+        produit_filter = self.produit_var.get()
+        mode = self.affichage_var.get()
+        
+        title = f"STATISTIQUES DES ACHATS - {mode}"
+        if fournisseur_filter != "Tous":
+            title += f" - Fournisseur: {fournisseur_filter}"
+        if produit_filter != "Tous":
+            title += f" - Produit: {produit_filter}"
+        
+        data.append(["", "", "", "", "", "", "", ""])
+        data.append(["TOTAL", "", "", 
+                    self.total_cartons_var.get(), 
+                    self.total_unites_var.get(),
+                    "", self.total_ca_var.get(), ""])
+        
+        print_preview(data, title, headers)
+    
+    def export_stats_csv(self):
+        """Exporte les statistiques en CSV"""
+        data = []
+        for item in self.tree.get_children():
+            values = self.tree.item(item)["values"]
+            data.append(values)
+        
+        if not data:
+            messagebox.showwarning("Avertissement", "Aucune donnée à exporter")
+            return
+        
+        headers = ["Fournisseur", "Produit", "TVA", "Qté Cartons", "Qté Unités", "Total HT", "Total TTC", "% du CA"]
+        
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile="statistiques_achats.csv"
+        )
+        
+        if filename:
+            data.append(["", "", "", "", "", "", "", ""])
+            data.append(["TOTAL", "", "", 
+                        self.total_cartons_var.get(), 
+                        self.total_unites_var.get(),
+                        "", self.total_ca_var.get(), ""])
+            
+            if export_to_csv(data, filename, headers):
+                messagebox.showinfo("Succès", f"Exporté vers {filename}")
+    
+    def export_stats_html(self):
+        """Exporte les statistiques en HTML"""
+        data = []
+        for item in self.tree.get_children():
+            values = self.tree.item(item)["values"]
+            data.append(values)
+        
+        if not data:
+            messagebox.showwarning("Avertissement", "Aucune donnée à exporter")
+            return
+        
+        headers = ["Fournisseur", "Produit", "TVA", "Qté Cartons", "Qté Unités", "Total HT", "Total TTC", "% du CA"]
+        
+        fournisseur_filter = self.fournisseur_var.get()
+        produit_filter = self.produit_var.get()
+        mode = self.affichage_var.get()
+        
+        title = f"STATISTIQUES DES ACHATS - {mode}"
+        if fournisseur_filter != "Tous":
+            title += f" - Fournisseur: {fournisseur_filter}"
+        if produit_filter != "Tous":
+            title += f" - Produit: {produit_filter}"
+        
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".html",
+            filetypes=[("HTML files", "*.html"), ("All files", "*.*")],
+            initialfile="statistiques_achats.html"
+        )
+        
+        if filename:
+            data.append(["", "", "", "", "", "", "", ""])
+            data.append(["TOTAL", "", "", 
+                        self.total_cartons_var.get(), 
+                        self.total_unites_var.get(),
+                        "", self.total_ca_var.get(), ""])
+            
+            if export_to_html(data, filename, title, headers):
+                if messagebox.askyesno("Ouverture", "Fichier créé. Voulez-vous l'ouvrir ?"):
+                    webbrowser.open(filename)                   
+class StatistiquesVentesPage(tk.Frame):
+    """Page de statistiques des ventes avec filtres par client, produit et période"""
+    
+    def __init__(self, parent):
+        super().__init__(parent, bg=CLR_BG)
+        self._build()
+        self.refresh()
+    
+    def _build(self):
+        # En-tête
+        hdr = tk.Frame(self, bg=CLR_BG)
+        hdr.pack(fill="x", padx=20, pady=(20,10))
+        lbl(hdr, "📊 Statistiques des Ventes par Client & Produit", 16, True).pack(side="left")
+        
+        # ========== FILTRES ==========
+        filter_frame = tk.LabelFrame(self, text="🔍 Filtres", 
+                                     bg=CLR_CARD, fg=CLR_ACCENT, 
+                                     font=("Segoe UI", 10, "bold"),
+                                     padx=15, pady=10)
+        filter_frame.pack(fill="x", padx=20, pady=10)
+        
+        # Ligne 1: Client
+        row1 = tk.Frame(filter_frame, bg=CLR_CARD)
+        row1.pack(fill="x", pady=5)
+        
+        lbl(row1, "👤 Client:", 9, False, CLR_MUTED).pack(side="left", padx=5)
+        
+        conn = get_conn()
+        clients = conn.execute("SELECT id, nom FROM clients ORDER BY nom").fetchall()
+        conn.close()
+        
+        self.clients_map = {c["nom"]: c["id"] for c in clients}
+        client_liste = ["Tous"] + list(self.clients_map.keys())
+        
+        self.client_var = tk.StringVar(value="Tous")
+        client_combo = combo(row1, client_liste, width=25, textvariable=self.client_var)
+        client_combo.pack(side="left", padx=10)
+        client_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
+        
+        # Ligne 2: Produit
+        row2 = tk.Frame(filter_frame, bg=CLR_CARD)
+        row2.pack(fill="x", pady=5)
+        
+        lbl(row2, "📦 Produit:", 9, False, CLR_MUTED).pack(side="left", padx=5)
+        
+        conn = get_conn()
+        produits = conn.execute("""
+            SELECT id, code, designation, unite, facteur_conversion 
+            FROM produits WHERE actif = 1 ORDER BY designation
+        """).fetchall()
+        conn.close()
+        
+        self.produits_map = {f"{p['code']} - {p['designation']}": dict(p) for p in produits}
+        produit_liste = ["Tous"] + list(self.produits_map.keys())
+        
+        self.produit_var = tk.StringVar(value="Tous")
+        produit_combo = combo(row2, produit_liste, width=35, textvariable=self.produit_var)
+        produit_combo.pack(side="left", padx=10)
+        produit_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
+        
+        # Ligne 3: Période
+        row3 = tk.Frame(filter_frame, bg=CLR_CARD)
+        row3.pack(fill="x", pady=5)
+        
+        lbl(row3, "📅 Du:", 9, False, CLR_MUTED).pack(side="left", padx=5)
+        self.date_debut_var = tk.StringVar(value=date.today().replace(day=1).strftime("%Y-%m-%d"))
+        entry(row3, width=12, textvariable=self.date_debut_var).pack(side="left", padx=5)
+        
+        lbl(row3, "Au:", 9, False, CLR_MUTED).pack(side="left", padx=5)
+        self.date_fin_var = tk.StringVar(value=date.today().strftime("%Y-%m-%d"))
+        entry(row3, width=12, textvariable=self.date_fin_var).pack(side="left", padx=5)
+        
+        tk.Button(row3, text="📊 Appliquer", command=self.refresh,
+                 bg=CLR_GREEN, fg="white", relief="flat", 
+                 font=("Segoe UI", 9, "bold"), padx=12, pady=4,
+                 cursor="hand2").pack(side="left", padx=20)
+        
+        # Ligne 4: Options d'affichage
+        row4 = tk.Frame(filter_frame, bg=CLR_CARD)
+        row4.pack(fill="x", pady=5)
+        
+        lbl(row4, "📊 Affichage:", 9, False, CLR_MUTED).pack(side="left", padx=5)
+        self.affichage_var = tk.StringVar(value="Par Client")
+        affichage_combo = combo(row4, ["Par Client", "Par Produit", "Détail Client-Produit"], 
+                               width=20, textvariable=self.affichage_var)
+        affichage_combo.pack(side="left", padx=10)
+        affichage_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
+        
+        lbl(row4, "📦 Unités:", 9, False, CLR_MUTED).pack(side="left", padx=(20,5))
+        self.unite_var = tk.StringVar(value="cartons")
+        unite_combo = combo(row4, ["cartons", "unités", "les deux"], width=10, 
+                           textvariable=self.unite_var)
+        unite_combo.pack(side="left", padx=10)
+        unite_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
+        
+        # Boutons d'action
+        btn_frame = tk.Frame(filter_frame, bg=CLR_CARD)
+        btn_frame.pack(fill="x", pady=5)
+        
+        tk.Button(btn_frame, text="🖨 Imprimer", command=self.print_stats,
+                 bg=CLR_ACCENT, fg="white", relief="flat", 
+                 font=("Segoe UI", 9, "bold"), padx=12, pady=4,
+                 cursor="hand2").pack(side="left", padx=5)
+        
+        tk.Button(btn_frame, text="📥 Exporter CSV", command=self.export_stats_csv,
+                 bg=CLR_ORANGE, fg="white", relief="flat", 
+                 font=("Segoe UI", 9, "bold"), padx=12, pady=4,
+                 cursor="hand2").pack(side="left", padx=5)
+        
+        tk.Button(btn_frame, text="📄 Exporter HTML", command=self.export_stats_html,
+                 bg=CLR_GREEN, fg="white", relief="flat", 
+                 font=("Segoe UI", 9, "bold"), padx=12, pady=4,
+                 cursor="hand2").pack(side="left", padx=5)
+        
+        # ========== TABLEAU DES RÉSULTATS ==========
+        # Colonnes variables selon le mode d'affichage
+        cols = ["Client", "Produit", "Qté Cartons", "Qté Unités", "Total HT", "Total TTC", "% du CA"]
+        widths = [180, 180, 100, 100, 120, 120, 80]
+        tf, self.tree = make_tree(self, cols, widths)
+        tf.pack(fill="both", expand=True, padx=20, pady=10)
+        
+        # ========== RÉCAPITULATIF ==========
+        recap_frame = tk.Frame(self, bg=CLR_CARD, padx=15, pady=10)
+        recap_frame.pack(fill="x", padx=20, pady=10)
+        
+        lbl(recap_frame, "📊 RÉCAPITULATIF", 11, True, CLR_ACCENT).pack(anchor="w", pady=(0,5))
+        tk.Frame(recap_frame, bg=CLR_BORDER, height=1).pack(fill="x", pady=5)
+        
+        totals_frame = tk.Frame(recap_frame, bg=CLR_CARD)
+        totals_frame.pack(fill="x", pady=5)
+        
+        # Colonne 1: Cartons
+        lbl(totals_frame, "Total Cartons:", 10, True, CLR_MUTED).pack(side="left", padx=(10,5))
+        self.total_cartons_var = tk.StringVar(value="0.00")
+        tk.Label(totals_frame, textvariable=self.total_cartons_var, bg=CLR_CARD, 
+                fg=CLR_ORANGE, font=("Segoe UI", 11, "bold")).pack(side="left", padx=(0,20))
+        
+        # Colonne 2: Unités
+        lbl(totals_frame, "Total Unités:", 10, True, CLR_MUTED).pack(side="left", padx=(10,5))
+        self.total_unites_var = tk.StringVar(value="0.00")
+        tk.Label(totals_frame, textvariable=self.total_unites_var, bg=CLR_CARD, 
+                fg=CLR_ACCENT, font=("Segoe UI", 11, "bold")).pack(side="left", padx=(0,20))
+        
+        # Colonne 3: CA
+        lbl(totals_frame, "CA Total:", 10, True, CLR_MUTED).pack(side="left", padx=(10,5))
+        self.total_ca_var = tk.StringVar(value="0.00 DA")
+        tk.Label(totals_frame, textvariable=self.total_ca_var, bg=CLR_CARD, 
+                fg=CLR_GREEN, font=("Segoe UI", 13, "bold")).pack(side="left", padx=(0,20))
+        
+        # Colonne 4: Nombre de lignes
+        lbl(totals_frame, "Lignes:", 10, True, CLR_MUTED).pack(side="left", padx=(10,5))
+        self.nb_lignes_var = tk.StringVar(value="0")
+        tk.Label(totals_frame, textvariable=self.nb_lignes_var, bg=CLR_CARD, 
+                fg=CLR_TEXT, font=("Segoe UI", 11, "bold")).pack(side="left", padx=(0,20))
+    
+    def get_stats(self):
+        """Récupère les statistiques des ventes selon les filtres"""
+        conn = get_conn()
+        
+        client_filter = self.client_var.get()
+        produit_filter = self.produit_var.get()
+        date_debut = self.date_debut_var.get()
+        date_fin = self.date_fin_var.get()
+        
+        # Construction de la requête
+        query = """
+            SELECT 
+                c.id as client_id,
+                c.nom as client_nom,
+                p.id as produit_id,
+                p.code as produit_code,
+                p.designation as produit_designation,
+                p.unite as produit_unite,
+                p.facteur_conversion,
+                COUNT(DISTINCT bv.id) as nb_bons,
+                COALESCE(SUM(lv.quantite), 0) as total_unites,
+                COALESCE(SUM(lv.quantite / NULLIF(p.facteur_conversion, 0)), 0) as total_cartons,
+                COALESCE(SUM(lv.total), 0) as total_ht
+            FROM bons_vente bv
+            JOIN clients c ON bv.client_id = c.id
+            JOIN lignes_vente lv ON bv.id = lv.bon_id
+            JOIN produits p ON lv.produit_id = p.id
+            WHERE bv.statut = 'Validé'
+        """
+        
+        params = []
+        
+        # Filtre client
+        if client_filter != "Tous" and client_filter in self.clients_map:
+            query += " AND c.id = ?"
+            params.append(self.clients_map[client_filter])
+        
+        # Filtre produit
+        if produit_filter != "Tous" and produit_filter in self.produits_map:
+            query += " AND p.id = ?"
+            params.append(self.produits_map[produit_filter]["id"])
+        
+        # Filtre dates
+        if date_debut and date_fin:
+            query += " AND bv.date_bon BETWEEN ? AND ?"
+            params.extend([date_debut, date_fin])
+        
+        query += " GROUP BY c.id, c.nom, p.id, p.code, p.designation, p.unite, p.facteur_conversion"
+        query += " ORDER BY c.nom, total_cartons DESC"
+        
+        rows = conn.execute(query, params).fetchall()
+        conn.close()
+        
+        return rows
+    
+    def refresh(self):
+        """Rafraîchit l'affichage selon le mode sélectionné"""
+        self.tree.delete(*self.tree.get_children())
+        
+        rows = self.get_stats()
+        
+        if not rows:
+            self.total_cartons_var.set("0.00")
+            self.total_unites_var.set("0.00")
+            self.total_ca_var.set("0.00 DA")
+            self.nb_lignes_var.set("0")
+            return
+        
+        # ✅ Convertir les rows en dictionnaires modifiables
+        rows = [dict(row) for row in rows]
+        
+        mode = self.affichage_var.get()
+        unite_mode = self.unite_var.get()
+        
+        total_cartons = 0
+        total_unites = 0
+        total_ca = 0
+        
+        # ✅ Récupérer les taux de TVA réels par produit
+        conn = get_conn()
+        tva_produits = {}
+        for r in rows:
+            if r["produit_id"] not in tva_produits:
+                p = conn.execute("SELECT tva FROM produits WHERE id=?", (r["produit_id"],)).fetchone()
+                tva_produits[r["produit_id"]] = p["tva"] if p and p["tva"] else 0
+        conn.close()
+        
+        if mode == "Par Client":
+            clients_data = {}
+            for r in rows:
+                client_id = r["client_id"]
+                if client_id not in clients_data:
+                    clients_data[client_id] = {
+                        "client_nom": r["client_nom"],
+                        "total_cartons": 0,
+                        "total_unites": 0,
+                        "total_ht": 0,
+                        "total_ttc": 0,
+                        "nb_bons": 0,
+                        "produits": []
+                    }
+                # ✅ Calculer le TTC réel avec le taux de TVA du produit
+                tva_taux = tva_produits.get(r["produit_id"], 0)
+                ttc_produit = r["total_ht"] * (1 + tva_taux / 100)
+                
+                clients_data[client_id]["total_cartons"] += r["total_cartons"]
+                clients_data[client_id]["total_unites"] += r["total_unites"]
+                clients_data[client_id]["total_ht"] += r["total_ht"]
+                clients_data[client_id]["total_ttc"] += ttc_produit
+                clients_data[client_id]["nb_bons"] += r["nb_bons"]
+                
+                # ✅ Stocker les données dans un dictionnaire pour les sous-lignes
+                r_dict = {
+                    "produit_id": r["produit_id"],
+                    "produit_designation": r["produit_designation"],
+                    "total_cartons": r["total_cartons"],
+                    "total_unites": r["total_unites"],
+                    "total_ht": r["total_ht"],
+                    "ttc": ttc_produit,
+                    "tva_taux": tva_taux,
+                    "nb_bons": r["nb_bons"]
+                }
+                clients_data[client_id]["produits"].append(r_dict)
+            
+            for client_id, data in clients_data.items():
+                total_cartons += data["total_cartons"]
+                total_unites += data["total_unites"]
+                total_ca += data["total_ht"]
+                
+                qte_cartons = f"{data['total_cartons']:.2f}" if unite_mode in ["cartons", "les deux"] else "-"
+                qte_unites = f"{data['total_unites']:.2f}" if unite_mode in ["unités", "les deux"] else "-"
+                
+                self.tree.insert("", "end", iid=f"client_{client_id}", values=(
+                    data["client_nom"],
+                    f"{len(data['produits'])} produits",
+                    qte_cartons,
+                    qte_unites,
+                    f"{data['total_ht']:,.2f} DA",
+                    f"{data['total_ttc']:,.2f} DA",
+                    ""
+                ), tags=("client_row",))
+                
+                for r_dict in data["produits"]:
+                    qte_cartons_prod = f"{r_dict['total_cartons']:.2f}" if unite_mode in ["cartons", "les deux"] else "-"
+                    qte_unites_prod = f"{r_dict['total_unites']:.2f}" if unite_mode in ["unités", "les deux"] else "-"
+                    
+                    pct = (r_dict['total_ht'] / data['total_ht'] * 100) if data['total_ht'] > 0 else 0
+                    
+                    tva_affichage = f"TVA {r_dict['tva_taux']:.0f}%"
+                    
+                    self.tree.insert("", "end", iid=f"client_{client_id}_prod_{r_dict['produit_id']}", values=(
+                        "  └ " + r_dict["produit_designation"] + f" ({tva_affichage})",
+                        f"{r_dict['nb_bons']} bons",
+                        qte_cartons_prod,
+                        qte_unites_prod,
+                        f"{r_dict['total_ht']:,.2f} DA",
+                        f"{r_dict['ttc']:,.2f} DA",
+                        f"{pct:.1f}%"
+                    ), tags=("detail_row",))
+            
+            self.tree.tag_configure("client_row", foreground=CLR_ACCENT, font=("Segoe UI", 9, "bold"))
+            self.tree.tag_configure("detail_row", foreground=CLR_TEXT)
+            
+        elif mode == "Par Produit":
+            produits_data = {}
+            for r in rows:
+                produit_id = r["produit_id"]
+                if produit_id not in produits_data:
+                    tva_taux = tva_produits.get(produit_id, 0)
+                    produits_data[produit_id] = {
+                        "produit_designation": r["produit_designation"],
+                        "produit_code": r["produit_code"],
+                        "total_cartons": 0,
+                        "total_unites": 0,
+                        "total_ht": 0,
+                        "total_ttc": 0,
+                        "nb_bons": 0,
+                        "tva_taux": tva_taux,
+                        "clients": []
+                    }
+                
+                ttc_produit = r["total_ht"] * (1 + produits_data[produit_id]["tva_taux"] / 100)
+                produits_data[produit_id]["total_cartons"] += r["total_cartons"]
+                produits_data[produit_id]["total_unites"] += r["total_unites"]
+                produits_data[produit_id]["total_ht"] += r["total_ht"]
+                produits_data[produit_id]["total_ttc"] += ttc_produit
+                produits_data[produit_id]["nb_bons"] += r["nb_bons"]
+                
+                r_dict = {
+                    "client_id": r["client_id"],
+                    "client_nom": r["client_nom"],
+                    "total_cartons": r["total_cartons"],
+                    "total_unites": r["total_unites"],
+                    "total_ht": r["total_ht"],
+                    "ttc": ttc_produit,
+                    "tva_taux": produits_data[produit_id]["tva_taux"],
+                    "nb_bons": r["nb_bons"]
+                }
+                produits_data[produit_id]["clients"].append(r_dict)
+            
+            for produit_id, data in produits_data.items():
+                total_cartons += data["total_cartons"]
+                total_unites += data["total_unites"]
+                total_ca += data["total_ht"]
+                
+                qte_cartons = f"{data['total_cartons']:.2f}" if unite_mode in ["cartons", "les deux"] else "-"
+                qte_unites = f"{data['total_unites']:.2f}" if unite_mode in ["unités", "les deux"] else "-"
+                
+                tva_affichage = f"TVA {data['tva_taux']:.0f}%"
+                
+                self.tree.insert("", "end", iid=f"produit_{produit_id}", values=(
+                    data["produit_designation"] + f" ({tva_affichage})",
+                    f"{len(data['clients'])} clients",
+                    qte_cartons,
+                    qte_unites,
+                    f"{data['total_ht']:,.2f} DA",
+                    f"{data['total_ttc']:,.2f} DA",
+                    ""
+                ), tags=("produit_row",))
+                
+                for r_dict in data["clients"]:
+                    qte_cartons_client = f"{r_dict['total_cartons']:.2f}" if unite_mode in ["cartons", "les deux"] else "-"
+                    qte_unites_client = f"{r_dict['total_unites']:.2f}" if unite_mode in ["unités", "les deux"] else "-"
+                    
+                    pct = (r_dict['total_ht'] / data['total_ht'] * 100) if data['total_ht'] > 0 else 0
+                    
+                    self.tree.insert("", "end", iid=f"produit_{produit_id}_client_{r_dict['client_id']}", values=(
+                        "  └ " + r_dict["client_nom"],
+                        f"{r_dict['nb_bons']} bons",
+                        qte_cartons_client,
+                        qte_unites_client,
+                        f"{r_dict['total_ht']:,.2f} DA",
+                        f"{r_dict['ttc']:,.2f} DA",
+                        f"{pct:.1f}%"
+                    ), tags=("detail_row",))
+            
+            self.tree.tag_configure("produit_row", foreground=CLR_GREEN, font=("Segoe UI", 9, "bold"))
+            self.tree.tag_configure("detail_row", foreground=CLR_TEXT)
+            
+        else:  # Détail Client-Produit
+            for r in rows:
+                total_cartons += r["total_cartons"]
+                total_unites += r["total_unites"]
+                total_ca += r["total_ht"]
+                
+                tva_taux = tva_produits.get(r["produit_id"], 0)
+                ttc = r["total_ht"] * (1 + tva_taux / 100)
+                
+                qte_cartons = f"{r['total_cartons']:.2f}" if unite_mode in ["cartons", "les deux"] else "-"
+                qte_unites = f"{r['total_unites']:.2f}" if unite_mode in ["unités", "les deux"] else "-"
+                
+                tva_affichage = f"TVA {tva_taux:.0f}%"
+                
+                self.tree.insert("", "end", iid=f"detail_{r['client_id']}_{r['produit_id']}", values=(
+                    r["client_nom"],
+                    r["produit_designation"] + f" ({tva_affichage})",
+                    qte_cartons,
+                    qte_unites,
+                    f"{r['total_ht']:,.2f} DA",
+                    f"{ttc:,.2f} DA",
+                    ""
+                ))
+        
+        self.total_cartons_var.set(f"{total_cartons:.2f}")
+        self.total_unites_var.set(f"{total_unites:.2f}")
+        self.total_ca_var.set(f"{total_ca:,.2f} DA")
+        self.nb_lignes_var.set(str(len(self.tree.get_children())))
+    
+    def print_stats(self):
+        """Imprime les statistiques"""
+        data = []
+        for item in self.tree.get_children():
+            values = self.tree.item(item)["values"]
+            data.append(values)
+        
+        if not data:
+            messagebox.showwarning("Avertissement", "Aucune donnée à imprimer")
+            return
+        
+        headers = ["Client", "Produit", "Qté Cartons", "Qté Unités", "Total HT", "Total TTC", "% du CA"]
+        
+        client_filter = self.client_var.get()
+        produit_filter = self.produit_var.get()
+        mode = self.affichage_var.get()
+        
+        title = f"STATISTIQUES DES VENTES - {mode}"
+        if client_filter != "Tous":
+            title += f" - Client: {client_filter}"
+        if produit_filter != "Tous":
+            title += f" - Produit: {produit_filter}"
+        
+        # Ajouter les totaux
+        data.append(["", "", "", "", "", "", ""])
+        data.append(["TOTAL", "", 
+                    self.total_cartons_var.get(), 
+                    self.total_unites_var.get(),
+                    "", self.total_ca_var.get(), ""])
+        
+        print_preview(data, title, headers)
+    
+    def export_stats_csv(self):
+        """Exporte les statistiques en CSV"""
+        data = []
+        for item in self.tree.get_children():
+            values = self.tree.item(item)["values"]
+            data.append(values)
+        
+        if not data:
+            messagebox.showwarning("Avertissement", "Aucune donnée à exporter")
+            return
+        
+        headers = ["Client", "Produit", "Qté Cartons", "Qté Unités", "Total HT", "Total TTC", "% du CA"]
+        
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            initialfile="statistiques_ventes.csv"
+        )
+        
+        if filename:
+            # Ajouter une ligne de totaux
+            data.append(["", "", "", "", "", "", ""])
+            data.append(["TOTAL", "", 
+                        self.total_cartons_var.get(), 
+                        self.total_unites_var.get(),
+                        "", self.total_ca_var.get(), ""])
+            
+            if export_to_csv(data, filename, headers):
+                messagebox.showinfo("Succès", f"Exporté vers {filename}")
+    
+    def export_stats_html(self):
+        """Exporte les statistiques en HTML"""
+        data = []
+        for item in self.tree.get_children():
+            values = self.tree.item(item)["values"]
+            data.append(values)
+        
+        if not data:
+            messagebox.showwarning("Avertissement", "Aucune donnée à exporter")
+            return
+        
+        headers = ["Client", "Produit", "Qté Cartons", "Qté Unités", "Total HT", "Total TTC", "% du CA"]
+        
+        client_filter = self.client_var.get()
+        produit_filter = self.produit_var.get()
+        mode = self.affichage_var.get()
+        
+        title = f"STATISTIQUES DES VENTES - {mode}"
+        if client_filter != "Tous":
+            title += f" - Client: {client_filter}"
+        if produit_filter != "Tous":
+            title += f" - Produit: {produit_filter}"
+        
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".html",
+            filetypes=[("HTML files", "*.html"), ("All files", "*.*")],
+            initialfile="statistiques_ventes.html"
+        )
+        
+        if filename:
+            # Ajouter une ligne de totaux
+            data.append(["", "", "", "", "", "", ""])
+            data.append(["TOTAL", "", 
+                        self.total_cartons_var.get(), 
+                        self.total_unites_var.get(),
+                        "", self.total_ca_var.get(), ""])
+            
+            if export_to_html(data, filename, title, headers):
+                if messagebox.askyesno("Ouverture", "Fichier créé. Voulez-vous l'ouvrir ?"):
+                    webbrowser.open(filename)                        
 # ========== PAGE FACTURES ==========
 
 class FacturePage(tk.Frame):
@@ -1483,7 +2544,9 @@ class FacturePage(tk.Frame):
         if messagebox.askyesno("Confirmation", "⚠️ Supprimer définitivement cette facture ?\nCette action est irréversible."):
             conn = get_conn()
             try:
-                conn.execute("DELETE FROM factures WHERE id=?", (sel[0],))
+                facture_id = sel[0]
+                conn.execute("DELETE FROM facture_tva_details WHERE facture_id=?", (facture_id,))
+                conn.execute("DELETE FROM factures WHERE id=?", (facture_id,))
                 conn.commit()
                 messagebox.showinfo("Succès", "Facture supprimée")
                 self.refresh()
@@ -1926,7 +2989,7 @@ class FactureEditDialog(tk.Toplevel):
             
             self.tva_montant_var.set(f"{tva_montant:,.2f} DA")
             self.total_ttc_var.set(f"{total_ttc:,.2f} DA")
-        except:
+        except (ValueError, TypeError):
             pass
     
     def save(self):
@@ -2243,196 +3306,29 @@ class FactureDetailDialog(tk.Toplevel):
         lbl(footer_frame, "Merci pour votre confiance !", 9, color=CLR_MUTED).pack()
         lbl(footer_frame, f"Document généré le {datetime.now().strftime('%d/%m/%Y à %H:%M:%S')}", 8, color=CLR_MUTED).pack()
     
-    def print_facture(self):
-        """Imprimer la facture"""
-        html_content = self._generate_html()
-        html_file = tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8')
-        try:
-            html_file.write(html_content)
-            html_file.close()
-            webbrowser.open(html_file.name)
-            messagebox.showinfo("Impression", "Document ouvert dans le navigateur.\nUtilisez Ctrl+P pour imprimer.")
-        except Exception as e:
-            messagebox.showerror("Erreur", f"Erreur: {str(e)}")
-        finally:
-            self.after(60000, lambda: os.unlink(html_file.name) if os.path.exists(html_file.name) else None)
-    
-    def export_pdf(self):
-        """Exporter la facture en PDF"""
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".pdf",
-            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
-            initialfile=f"Facture_{self.facture['numero']}.pdf"
-        )
-        if not filename:
-            return
-        
-        html_content = self._generate_html()
-        html_file = tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8')
-        try:
-            html_file.write(html_content)
-            html_file.close()
-            
-            wkhtmltopdf = shutil.which("wkhtmltopdf")
-            if wkhtmltopdf:
-                try:
-                    subprocess.run([wkhtmltopdf, html_file.name, filename], check=True, timeout=30)
-                    messagebox.showinfo("Succès", f"PDF créé : {filename}")
-                    return
-                except Exception as e:
-                    messagebox.showwarning("Avertissement", f"wkhtmltopdf a échoué : {e}")
-            
-            webbrowser.open(html_file.name)
-            messagebox.showinfo("Info", "HTML ouvert dans le navigateur.\nUtilisez 'Imprimer > Enregistrer au format PDF'.")
-        except Exception as e:
-            messagebox.showerror("Erreur", str(e))
-        finally:
-            self.after(60000, lambda: os.unlink(html_file.name) if os.path.exists(html_file.name) else None)
-    
-    def _generate_html(self):
-        """Générer le HTML de la facture"""
+    def _get_html(self) -> str:
+        from gestion_stock import get_profil_by_type
         profil = get_profil_by_type("facture")
-        if profil:
-            nom_entreprise = profil.get("nom", "") or "VOTRE SOCIÉTÉ"
-            adresse_entreprise = profil.get("adresse", "") or ""
-            telephone_entreprise = profil.get("telephone", "") or ""
-            email_entreprise = profil.get("email", "") or ""
-            ville_entreprise = profil.get("ville", "") or ""
-            nif = profil.get("nif", "") or ""
-            nis = profil.get("nis", "") or ""
-            nrc = profil.get("nrc", "") or ""
-        else:
-            nom_entreprise = "VOTRE SOCIÉTÉ"
-            adresse_entreprise = telephone_entreprise = email_entreprise = ville_entreprise = ""
-            nif = nis = nrc = ""
-
-        total_general = self.facture['total_ttc']
-        tva_montant = self.facture['total_ht'] * self.facture['tva'] / 100
-        
-        tiers_label = "Client"
-        tiers_nom = self.facture['client_nom']
-
-        # Génération des lignes du tableau
-        lignes_html = ""
-        for l in self.lignes:
-            lignes_html += f"""
-            <tr>
-                <td style="border: 1px solid #ddd; padding: 8px;">{l['designation']}</td>
-                <td style="border: 1px solid #ddd; padding: 8px; text-align: center;">{float(l['quantite']):.2f}</td>
-                <td style="border: 1px solid #ddd; padding: 8px; text-align: center;">{l['unite'] or ''}</td>
-                <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">{float(l['prix_unitaire']):.2f}</td>
-                <td style="border: 1px solid #ddd; padding: 8px; text-align: right;">{float(l['total']):.2f}</td>
-            </tr>
-            """
-
-        observations_html = ""
-        if self.facture['observations']:
-            observations_html = f'<div style="margin-top: 15px; padding: 10px; background: #fef3c7; border-left: 4px solid #f97316; border-radius: 4px;"><strong>📝 Observations :</strong><br>{self.facture["observations"]}</div>'
-
-        echeance_html = ""
-        if self.facture['date_echeance']:
-            echeance_html = f'<div class="info-line"><span class="info-label">📅 Date échéance :</span><span>{self.facture["date_echeance"]}</span></div>'
-
-        html_content = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>FACTURE N°{self.facture['numero']}</title>
-    <style>
-        body {{ font-family: Arial, sans-serif; margin: 20px; color: #222; font-size: 13px; }}
-        .header {{ text-align: center; margin-bottom: 20px; border-bottom: 2px solid #3b82f6; padding-bottom: 12px; }}
-        .header h2  {{ margin: 4px 0; font-size: 18px; color: #111; }}
-        .header p   {{ margin: 2px 0; font-size: 12px; color: #555; }}
-        .title      {{ font-size: 16px; font-weight: bold; color: #3b82f6; margin-top: 10px; }}
-        .info-box   {{ border: 1px solid #ddd; padding: 10px 14px; margin: 14px 0; border-radius: 6px; background: #fafafa; }}
-        .info-line  {{ margin: 4px 0; }}
-        .info-label {{ font-weight: bold; display: inline-block; min-width: 200px; }}
-        table       {{ width: 100%; border-collapse: collapse; margin: 10px 0; }}
-        th          {{ background: #3b82f6; color: white; padding: 8px; text-align: left; font-size: 12px; }}
-        td          {{ border: 1px solid #ddd; padding: 6px 8px; }}
-        tr:nth-child(even) td {{ background: #f8f9ff; }}
-        tfoot td    {{ font-weight: bold; background: #eef2ff !important; border-top: 2px solid #3b82f6; }}
-        .footer     {{ text-align: center; margin-top: 24px; font-size: 10px; color: #999; border-top: 1px solid #eee; padding-top: 8px; }}
-        @media print {{
-            body {{ margin: 0; padding: 8mm; }}
-            @page {{ size: A4; margin: 12mm; }}
-        }}
-    </style>
-</head>
-<body>
-
-<div class="header">
-    <h2>{nom_entreprise}</h2>
-    {f"<p>{adresse_entreprise}</p>" if adresse_entreprise else ""}
-    {f"<p>{ville_entreprise}</p>" if ville_entreprise else ""}
-    {f"<p>Tél: {telephone_entreprise} | Email: {email_entreprise}</p>" if telephone_entreprise or email_entreprise else ""}
-    {f"<p>NIF: {nif} | NIS: {nis} | NRC: {nrc}</p>" if nif or nis or nrc else ""}
-    <div class="title">FACTURE N° {self.facture['numero']}</div>
-</div>
-
-<div class="info-box">
-    <div class="info-line">
-        <span class="info-label">📄 N° Facture :</span>
-        <span>{self.facture['numero']}</span>
-    </div>
-    <div class="info-line">
-        <span class="info-label">📅 Date d'émission :</span>
-        <span>{self.facture['date_facture']}</span>
-    </div>
-    <div class="info-line">
-        <span class="info-label">👥 {tiers_label} :</span>
-        <span>{tiers_nom}</span>
-    </div>
-    <div class="info-line">
-        <span class="info-label">🧾 Bon de vente :</span>
-        <span>{self.facture['bon_numero']}</span>
-    </div>
-    {echeance_html}
-    <div class="info-line">
-        <span class="info-label">📊 Statut :</span>
-        <span style="color: {'#22c55e' if self.facture['statut'] == 'Payée' else '#f97316' if self.facture['statut'] == 'Émise' else '#ef4444'}; font-weight: bold;">{self.facture['statut']}</span>
-    </div>
-</div>
-
-<table>
-    <thead>
-        <tr>
-            <th style="width: 40%;">Désignation</th>
-            <th style="width: 15%; text-align: center;">Quantité</th>
-            <th style="width: 10%; text-align: center;">Unité</th>
-            <th style="width: 15%; text-align: right;">Prix Unit.</th>
-            <th style="width: 20%; text-align: right;">Total</th>
-        </tr>
-    </thead>
-    <tbody>
-        {lignes_html}
-    </tbody>
-    <tfoot>
-        <tr>
-            <td colspan="4" style="text-align: right; border-top: 2px solid #3b82f6;"><strong>Total HT</strong></td>
-            <td style="text-align: right; border-top: 2px solid #3b82f6;"><strong>{self.facture['total_ht']:,.2f} DA</strong></td>
-        </tr>
-        <tr>
-            <td colspan="4" style="text-align: right;">TVA ({self.facture['tva']:.0f}%)</td>
-            <td style="text-align: right;">{tva_montant:,.2f} DA</td>
-        </tr>
-        <tr style="background: #eef2ff; font-weight: bold;">
-            <td colspan="4" style="text-align: right;"><strong>TOTAL TTC</strong></td>
-            <td style="text-align: right;"><strong style="color: #22c55e;">{self.facture['total_ttc']:,.2f} DA</strong></td>
-        </tr>
-    </tfoot>
-</table>
-
-{observations_html}
-
-<div class="footer">
-    Merci pour votre confiance !<br>
-    Document généré le {datetime.now().strftime('%d/%m/%Y à %H:%M:%S')}
-</div>
-
-</body>
-</html>"""
-        return html_content
+        # Enrichir bon_data avec les champs attendus
+        fac = dict(self.facture)
+        fac["bon_numero"] = self.facture.get("bon_numero", "")
+        return hr.build_facture_html(
+            profil      = profil,
+            facture     = fac,
+            lignes      = [dict(l) for l in self.lignes],
+            tva_details = [dict(t) for t in self.tva_details],
+        )
+ 
+    def print_facture(self):
+        viewer = hr.DocumentViewer(self)
+        viewer.show(self._get_html(), f"Facture {self.facture['numero']}")
+ 
+    def export_pdf(self):
+        viewer = hr.DocumentViewer(self)
+        viewer.export_pdf(
+            self._get_html(),
+            default_name=f"Facture_{self.facture['numero']}.pdf",
+        )
 
 # ========== PAGE PRODUITS ==========
 
@@ -2698,33 +3594,30 @@ class ProduitPage(tk.Frame):
                 messagebox.showinfo("Succès", f"Fichier CSV créé: {filename}")
 
     def export_inventaire_pdf(self):
-        headers, data = self.build_inventaire_data()
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".pdf",
-            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
-            initialfile="inventaire.pdf"
+        from gestion_stock import get_conn
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT * FROM produits WHERE actif=1 ORDER BY designation"
+        ).fetchall()
+        conn.close()
+        html = hr.build_inventaire_html(
+            [dict(r) for r in rows], titre="Inventaire des produits"
         )
-        if not filename:
-            return
-        html_file = tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8')
-        try:
-            export_to_html(data, html_file.name, "Inventaire", headers)
-            html_file.close()
-            wkhtmltopdf = shutil.which("wkhtmltopdf")
-            if wkhtmltopdf:
-                try:
-                    subprocess.run([wkhtmltopdf, html_file.name, filename], check=True)
-                    messagebox.showinfo("Succès", f"PDF créé : {filename}")
-                    return
-                except Exception as e:
-                    messagebox.showwarning("Avertissement", f"wkhtmltopdf a échoué : {e}\nLe HTML sera ouvert dans le navigateur.")
-            webbrowser.open(html_file.name)
-            messagebox.showinfo("Info", "wkhtmltopdf introuvable ou en échec. Le fichier HTML d'inventaire a été ouvert dans votre navigateur. Utilisez 'Imprimer > Enregistrer au format PDF' pour générer le PDF.")
-        except Exception as e:
-            messagebox.showerror("Erreur", f"Impossible de générer le PDF : {e}")
-        finally:
-            if os.path.exists(html_file.name):
-                self.after(60000, lambda: os.unlink(html_file.name) if os.path.exists(html_file.name) else None)
+        viewer = hr.DocumentViewer(self)
+        viewer.export_pdf(html, "inventaire.pdf")
+ 
+    def export_inventaire_html(self):
+        from gestion_stock import get_conn
+        conn = get_conn()
+        rows = conn.execute(
+            "SELECT * FROM produits WHERE actif=1 ORDER BY designation"
+        ).fetchall()
+        conn.close()
+        html = hr.build_inventaire_html(
+            [dict(r) for r in rows], titre="Inventaire des produits"
+        )
+        viewer = hr.DocumentViewer(self)
+        viewer.export_html(html, "inventaire.html")
 
     def new_item(self): 
         self._form()
@@ -3018,6 +3911,7 @@ class TiersPage(tk.Frame):
         super().__init__(parent, bg=CLR_BG)
         self._build()
         self.refresh()
+        self.tiers_list = []
 
 
     def _build(self):
@@ -3066,11 +3960,15 @@ class TiersPage(tk.Frame):
         d = PrixSpeciauxClientDialog(self, client["id"], client["nom"])
         self.wait_window(d)
     def refresh(self):
+        """Rafraîchit la liste et met à jour la liste des noms"""
         q = self.search_var.get().lower()
         self.tree.delete(*self.tree.get_children())
         conn = get_conn()
         rows = conn.execute(f"SELECT * FROM {self.table} ORDER BY nom").fetchall()
         conn.close()
+        
+        # ✅ METTRE À JOUR LA LISTE DES TIERS
+        self.tiers_list = []
         for r in rows:
             if q in r["code"].lower() or q in r["nom"].lower():
                 clr = CLR_RED if r["solde"] < 0 else CLR_TEXT
@@ -3079,15 +3977,32 @@ class TiersPage(tk.Frame):
                         r["code"], 
                         r["nom"], 
                         r["adresse"] or "",
-                        r["ville"] or "",  # ✅ AJOUTÉ
+                        r["ville"] or "",
                         r["tel"] or "",
                         r["email"] or "",
-                        r["nif"] or "",    # ✅ AJOUTÉ
+                        r["nif"] or "",
                         f"{r['solde']:.2f}"
                     ),
                     tags=("neg",) if r["solde"] < 0 else ())
+                self.tiers_list.append(r["nom"])  # ✅ AJOUTER À LA LISTE
         self.tree.tag_configure("neg", foreground=CLR_RED)
-
+        
+        # ✅ METTRE À JOUR LES COMBOBOX DANS LES AUTRES PAGES
+        self.update_comboboxes()
+    def update_comboboxes(self):
+        """Met à jour les combobox des autres pages"""
+        # Si nous sommes dans la page des clients, mettre à jour les combos de ventes
+        if self.tiers_type == "client":
+            if hasattr(self.master, '_pages') and 'bons_vente' in self.master._pages:
+                bon_vente_page = self.master._pages['bons_vente']
+                if hasattr(bon_vente_page, 'load_clients_list'):
+                    bon_vente_page.load_clients_list()
+        # Si nous sommes dans la page des fournisseurs, mettre à jour les combos d'achats
+        elif self.tiers_type == "fournisseur":
+            if hasattr(self.master, '_pages') and 'bons_achat' in self.master._pages:
+                bon_achat_page = self.master._pages['bons_achat']
+                if hasattr(bon_achat_page, 'load_fournisseurs_list'):
+                    bon_achat_page.load_fournisseurs_list()
     def _form(self, data=None):
         d = TiersDialog(self, self.tiers_type, data)
         self.wait_window(d)
@@ -3125,6 +4040,7 @@ class TiersDialog(tk.Toplevel):
     def __init__(self, parent, tiers_type, data=None):
         super().__init__(parent)
         self.tiers_type = tiers_type
+        self.parent = parent
         self.title("Client" if tiers_type == "client" else "Fournisseur")
         self.configure(bg=CLR_BG)
         self.resizable(True, True)  # ✅ Permettre le redimensionnement
@@ -3310,6 +4226,8 @@ class TiersDialog(tk.Toplevel):
             
             conn.commit()
             conn.close()
+            if hasattr(self.parent, 'refresh'):
+                self.parent.refresh()
             messagebox.showinfo("Succès", f"{'Client' if self.tiers_type == 'client' else 'Fournisseur'} enregistré avec succès !")
             self.destroy()
         except sqlite3.IntegrityError:
@@ -3557,27 +4475,7 @@ class BonAchatPage(tk.Frame):
             bon = conn.execute("SELECT * FROM bons_achat WHERE id=?", (bon_id,)).fetchone()
             lignes = conn.execute("SELECT * FROM lignes_achat WHERE bon_id=?", (bon_id,)).fetchall()
             if bon["statut"] != "Annulé":
-                for l in lignes:
-                    recalculer_cout_stock_apres_sortie(conn, l["produit_id"], l["quantite"])
-                    conn.execute(
-                        "UPDATE produits SET stock_actuel = stock_actuel - ? WHERE id=?",
-                        (l["quantite"], l["produit_id"])
-                    )
-                    produit = conn.execute(
-                        "SELECT stock_actuel, cout_total_stock FROM produits WHERE id=?",
-                        (l["produit_id"],)
-                    ).fetchone()
-                    if produit["stock_actuel"] > 0:
-                        nouveau_pmp = produit["cout_total_stock"] / produit["stock_actuel"]
-                        conn.execute(
-                            "UPDATE produits SET prix_moyen_pondere = ? WHERE id=?",
-                            (nouveau_pmp, l["produit_id"])
-                        )
-                    else:
-                        conn.execute(
-                            "UPDATE produits SET prix_moyen_pondere = 0, cout_total_stock = 0 WHERE id=?",
-                            (l["produit_id"],)
-                        )
+                inverser_stock_achat(conn, lignes)
                 conn.execute("UPDATE fournisseurs SET solde = solde - ? WHERE id=?", 
                         (bon["total"], bon["fournisseur_id"]))
             conn.execute("DELETE FROM lignes_achat WHERE bon_id=?", (bon_id,))
@@ -3604,9 +4502,7 @@ class BonAchatPage(tk.Frame):
                 conn.close()
                 return
             lignes = conn.execute("SELECT * FROM lignes_achat WHERE bon_id=?", (sel[0],)).fetchall()
-            for l in lignes:
-                conn.execute("UPDATE produits SET stock_actuel = stock_actuel - ? WHERE id=?",
-                             (l["quantite"], l["produit_id"]))
+            inverser_stock_achat(conn, lignes)
             fid = bon["fournisseur_id"]
             conn.execute("UPDATE fournisseurs SET solde = solde - ? WHERE id=?", (bon["total"], fid))
             conn.execute("UPDATE bons_achat SET statut='Annulé' WHERE id=?", (sel[0],))
@@ -4516,7 +5412,7 @@ class VenteComptoirDialog(tk.Toplevel):
                 self.monnaie_var.set(f"{monnaie:,.2f} DA")
             else:
                 self.monnaie_var.set(f"Manque: {total - recu:,.2f} DA")
-        except:
+        except (ValueError, TypeError):
             self.monnaie_var.set("0.00 DA")
     
     def valider_vente(self):
@@ -4535,7 +5431,7 @@ class VenteComptoirDialog(tk.Toplevel):
         
         try:
             recu = parse_decimal(self.montant_recu_var.get() or "0")
-        except:
+        except ValueError:
             recu = 0
         
         if recu < total:
@@ -5801,23 +6697,31 @@ class BonDialog(tk.Toplevel):
         # Calculer les totaux HT et TTC
         total_ht_brut = sum(l.get("total_ht", l["total"]) for l in self.lignes)
         
-        # ✅ APPLIQUER LA REMISE SI ELLE EXISTE
+        # ✅ CORRECTION : Vérifier si les attributs de remise existent
         remise_montant = 0
-        remise_type = self.remise_type_var.get()
-        remise_valeur = parse_decimal(self.remise_valeur_var.get() or "0")
+        remise_type = "aucune"
+        remise_valeur = 0
         motif_remise = ""
         
-        if self.bon_type == "vente" and remise_type != "aucune" and remise_valeur > 0:
-            if remise_type == "pourcentage":
-                remise_montant = total_ht_brut * remise_valeur / 100
-            else:  # montant fixe
-                remise_montant = min(remise_valeur, total_ht_brut)
+        if self.bon_type == "vente" and hasattr(self, 'remise_type_var'):
+            remise_type = self.remise_type_var.get()
+            try:
+                remise_valeur = parse_decimal(self.remise_valeur_var.get() or "0")
+            except ValueError:
+                remise_valeur = 0
             
-            total_ht = total_ht_brut - remise_montant
-            motif_remise = self.remise_motif_var.get().strip() or "Remise accordée"
+            if remise_type != "aucune" and remise_valeur > 0:
+                if remise_type == "pourcentage":
+                    remise_montant = total_ht_brut * remise_valeur / 100
+                else:  # montant fixe
+                    remise_montant = min(remise_valeur, total_ht_brut)
+                
+                total_ht = total_ht_brut - remise_montant
+                motif_remise = self.remise_motif_var.get().strip() or "Remise accordée"
+            else:
+                total_ht = total_ht_brut
         else:
             total_ht = total_ht_brut
-            remise_montant = 0
         
         # Calculer la TVA et le TTC
         total_tva = 0
@@ -5975,8 +6879,6 @@ class BonDialog(tk.Toplevel):
                 bon_id = conn.execute("SELECT id FROM bons_vente WHERE numero=?", (num,)).fetchone()["id"]
                 
                 # ✅ ENREGISTRER LES REMISES PAR PRODUIT
-                # Dans BonDialog.save(), vers la fin, pour les VENTES
-                # ✅ ENREGISTRER LES REMISES PAR PRODUIT
                 for l in self.lignes:
                     remise_produit = l.get("remise_produit", 0)
                     if remise_produit > 0:
@@ -5999,12 +6901,11 @@ class BonDialog(tk.Toplevel):
                 for l in self.lignes:
                     quantite_vente = l.get("quantite_base", l["quantite"])
                     ht_avec_remise = l.get("total_ht", l["total"])
-                    prix_avec_remise = l.get("prix_remise", l["prix"])
                     
                     conn.execute("""
                         INSERT INTO lignes_vente(bon_id, produit_id, quantite, prix_unitaire, total)
                         VALUES(?, ?, ?, ?, ?)
-                    """, (bon_id, l["produit_id"], quantite_vente,l["prix"], ht_avec_remise))
+                    """, (bon_id, l["produit_id"], quantite_vente, l["prix"], ht_avec_remise))
                     
                     # ✅ Mise à jour du stock
                     conn.execute("UPDATE produits SET stock_actuel = stock_actuel - ? WHERE id=?",
@@ -6333,8 +7234,9 @@ class BonEditDialog(tk.Toplevel):
         prod = self.prod_map[key]
         facteur = float(prod["facteur_conversion"]) if prod["facteur_conversion"] else 1.0
         
-        # ✅ RÉCUPÉRER LA TVA DU PRODUIT
-        tva_taux = float(prod.get("tva") or 0)
+        # ✅ CORRECTION : Utiliser l'indexation directe pour sqlite3.Row
+        tva_taux = float(prod["tva"] or 0)
+        barcode = prod["barcode"] if prod["barcode"] else ""
         
         quantite_base = qty * facteur
         total_ht = quantite_base * prix
@@ -6367,13 +7269,13 @@ class BonEditDialog(tk.Toplevel):
                 self.prix_var.set("")
                 return
 
-        # ✅ NOUVEAU PRODUIT
+        # ✅ NOUVEAU PRODUIT - Utiliser l'indexation directe partout
         self.lignes.append({
             "produit_id": prod["id"],
             "designation": key,
             "code": prod["code"],
             "unite": prod["unite"] or "Pcs",
-            "barcode": prod.get("barcode", ""),
+            "barcode": barcode,  # ✅ Déjà récupéré avec l'indexation directe
             "quantite": quantite_base,
             "facteur": facteur,
             "prix": prix,
@@ -6801,269 +7703,37 @@ class BonDetailDialog(tk.Toplevel):
         tk.Button(btn_frame, text="❌ Fermer", command=self.destroy,
                 bg=CLR_BORDER, fg=CLR_TEXT, relief="flat",
                 font=("Segoe UI", 9), padx=14, pady=6, cursor="hand2").pack(side="left", padx=4)
-    def print_bon(self):
-        title = "BON D'ACHAT" if self.bon_type == 'achat' else "BON DE VENTE"
-        import tempfile, webbrowser
-        html_file = tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8')
-        try:
-            self._create_bon_html(html_file.name, f"{title} N°{self.bon_data['numero']}")
-            html_file.close()
-            webbrowser.open(html_file.name)
-            messagebox.showinfo("Impression", "Document ouvert dans le navigateur.\nUtilisez Ctrl+P pour imprimer.")
-        except Exception as e:
-            messagebox.showerror("Erreur", f"Erreur lors de l'impression : {str(e)}")
-        finally:
-            self.after(60000, lambda: os.unlink(html_file.name) if os.path.exists(html_file.name) else None)
-    def export_pdf(self):
-        title = "BON D'ACHAT" if self.bon_type == 'achat' else "BON DE VENTE"
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".pdf",
-            filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
-            initialfile=f"{title}_{self.bon_data['numero']}.pdf"
-        )
-        if not filename:
-            return
-        
-        html_file = tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8')
-        try:
-            self._create_bon_html(html_file.name, f"{title} N°{self.bon_data['numero']}")
-            html_file.close()
-            
-            wkhtmltopdf = shutil.which("wkhtmltopdf")
-            if wkhtmltopdf:
-                try:
-                    subprocess.run([wkhtmltopdf, html_file.name, filename], check=True, timeout=30)
-                    messagebox.showinfo("Succès", f"PDF créé : {filename}")
-                    return
-                except Exception as e:
-                    messagebox.showwarning("Avertissement", f"wkhtmltopdf a échoué : {e}")
-            
-            webbrowser.open(html_file.name)
-            messagebox.showinfo("Info", "HTML ouvert dans le navigateur.\nUtilisez 'Imprimer > Enregistrer au format PDF'.")
-        except Exception as e:
-            messagebox.showerror("Erreur", str(e))
-        finally:
-            self.after(60000, lambda: os.unlink(html_file.name) if os.path.exists(html_file.name) else None)
-    def _create_bon_html(self, path, title):
+    def _get_html(self) -> str:
+        """Génère le HTML via le module centralisé."""
+        from gestion_stock import get_profil_by_type, get_conn
         profil = get_profil_by_type("bon_livraison")
-        if profil:
-            nom_entreprise = profil.get("nom", "") or "VOTRE SOCIÉTÉ"
-            adresse_entreprise = profil.get("adresse", "") or ""
-            telephone_entreprise = profil.get("telephone", "") or ""
-            email_entreprise = profil.get("email", "") or ""
-            ville_entreprise = profil.get("ville", "") or ""
-            nif = profil.get("nif", "") or ""
-            nis = profil.get("nis", "") or ""
-            nrc = profil.get("nrc", "") or ""
-        else:
-            nom_entreprise = "VOTRE SOCIÉTÉ"
-            adresse_entreprise = telephone_entreprise = email_entreprise = ville_entreprise = ""
-            nif = nis = nrc = ""
-
-        # Calcul du total HT et récupération de la TVA
-        total_ht = sum(float(l["total"] or 0) for l in self.lignes_data)
-        
-        # ✅ Créer un dictionnaire des remises par produit
-        remises_dict = {}
-        for remise in self.remises_data:
-            remise = dict(remise)
-            produit_id = remise.get("produit_id")
-            if produit_id:
-                remises_dict[produit_id] = remise
-        
-        tva_details = {}
-        tva_taux = 0
-        for l in self.lignes_data:
-            l = dict(l)
-            ht_l = float(l.get("total_ht") or l.get("total") or 0)
-            taux = float(l.get("tva_taux") or 0)
-            if taux == 0:
-                conn_tmp = get_conn()
-                p = conn_tmp.execute("SELECT tva FROM produits WHERE id=?", (l["produit_id"],)).fetchone()
-                conn_tmp.close()
-                taux = float(p["tva"] or 0) if p else 0
-            if self.bon_type == "vente":
-                taux = 0
-            tva_l = ht_l * taux / 100
-            if taux not in tva_details:
-                tva_details[taux] = {"ht": 0.0, "tva": 0.0}
-            tva_details[taux]["ht"] += ht_l
-            tva_details[taux]["tva"] += tva_l
-
-        total_tva = sum(v["tva"] for v in tva_details.values())
-        total_ttc = total_ht + total_tva
-        
-        tiers_label = "Fournisseur" if self.bon_type == "achat" else "Client"
-        tiers_nom = self.bon_data.get("tiers", "")
-
-        # ✅ Génération des lignes du tableau AVEC colonne Remise
-        lignes_html = ""
-        for l in self.lignes_data:
-            facteur = l["facteur_conversion"] if l["facteur_conversion"] is not None else 1
-            qte_carton = l["quantite"] / facteur if facteur else l["quantite"]
-            
-            # ✅ Récupérer la remise du produit si elle existe
-            remise_info = remises_dict.get(l["produit_id"])
-            if remise_info:
-                remise_valeur = remise_info.get("valeur", 0)
-                remise_affichage = f"{remise_valeur:.0f}%"
-            else:
-                remise_affichage = "-"
-            
-            lignes_html += f"""
-            <tr>
-                <td style="border: 1px solid #ddd; padding: 8px;">{l['code']}</td>
-                <td style="border: 1px solid #ddd; padding: 8px;">{l['designation']}</td>
-                <td style="text-align:center; border: 1px solid #ddd; padding: 8px;">{float(l['quantite']):.2f}</td>
-                <td style="text-align:center; border: 1px solid #ddd; padding: 8px;">{qte_carton:.2f}</td>
-                <td style="text-align:center; border: 1px solid #ddd; padding: 8px;">{l['unite'] or ''}</td>
-                <td style="text-align:right; border: 1px solid #ddd; padding: 8px;">{float(l['prix_unitaire']):.2f}</td>
-                <td style="text-align:center; border: 1px solid #ddd; padding: 8px;">{remise_affichage}</td>
-                <td style="text-align:right; border: 1px solid #ddd; padding: 8px;">{float(l['total']):.2f}</td>
-            </tr>
-            """
-
-        # ✅ Génération des remises HTML
-        remises_html = ""
-        if self.remises_data and len(self.remises_data) > 0:
-            remises_html = """
-            <div style="margin-top: 15px; padding: 10px; background: #fef3c7; border: 1px solid #f97316; border-radius: 8px;">
-                <h3 style="color: #f97316; margin: 0 0 10px 0;">🏷️ Remises appliquées</h3>
-            """
-            total_remise = 0
-            for remise in self.remises_data:
-                remise = dict(remise) if hasattr(remise, 'keys') else remise
-                remise_montant = (remise.get("total_avant") or 0) - (remise.get("total_apres") or 0)
-                total_remise += remise_montant
-                remise_valeur = remise.get("valeur", 0)
-                remise_motif = remise.get("motif") or "Sans motif"
-                
-                icon = "📦" if remise.get("type") == "produit" else "📊" if remise.get("type") == "pourcentage" else "💰" if remise.get("type") == "montant" else "🏷️"
-                
-                remises_html += f"""
-                <div style="display: flex; justify-content: space-between; padding: 3px 0; border-bottom: 1px dashed #fde68a;">
-                    <span>{icon} Remise {remise_valeur:.0f}% - {remise_motif}</span>
-                    <span style="color: #ef4444; font-weight: bold;">-{remise_montant:,.2f} DA</span>
-                </div>
-                """
-            if total_remise > 0:
-                remises_html += f"""
-                <div style="border-top: 2px solid #f97316; margin: 8px 0 0 0; padding-top: 8px;">
-                    <div style="display: flex; justify-content: space-between; font-weight: bold; font-size: 14px;">
-                        <span>💰 TOTAL REMISE</span>
-                        <span style="color: #ef4444;">-{total_remise:,.2f} DA</span>
-                    </div>
-                </div>
-                """
-            remises_html += "</div>"
-
-        html_content = f"""<!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <title>{title}</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 20px; color: #222; font-size: 13px; }}
-            .header {{ text-align: center; margin-bottom: 20px; border-bottom: 2px solid #3b82f6; padding-bottom: 12px; }}
-            .header h2 {{ margin: 4px 0; font-size: 18px; color: #111; }}
-            .header p {{ margin: 2px 0; font-size: 12px; color: #555; }}
-            .title {{ font-size: 16px; font-weight: bold; color: #3b82f6; margin-top: 10px; }}
-            .info-box {{ border: 1px solid #ddd; padding: 10px 14px; margin: 14px 0; border-radius: 6px; background: #fafafa; }}
-            .info-line {{ margin: 4px 0; }}
-            .info-label {{ font-weight: bold; display: inline-block; min-width: 200px; }}
-            table {{ width: 100%; border-collapse: collapse; margin: 10px 0; }}
-            th {{ background: #3b82f6; color: white; padding: 8px; text-align: left; font-size: 12px; }}
-            td {{ border: 1px solid #ddd; padding: 6px 8px; }}
-            tr:nth-child(even) td {{ background: #f8f9ff; }}
-            .remise-cell {{ color: #f97316; font-weight: bold; }}
-            tfoot td {{ font-weight: bold; background: #eef2ff !important; border-top: 2px solid #3b82f6; }}
-            .recap-box {{ margin-top: 15px; padding: 10px; background: #f0fdf4; border: 1px solid #22c55e; border-radius: 8px; width: 300px; margin-left: auto; }}
-            .recap-line {{ display: flex; justify-content: space-between; padding: 5px 0; }}
-            .recap-label {{ font-weight: bold; color: #555; }}
-            .recap-value {{ font-weight: bold; }}
-            .footer {{ text-align: center; margin-top: 24px; font-size: 10px; color: #999; border-top: 1px solid #eee; padding-top: 8px; }}
-            @media print {{
-                body {{ margin: 0; padding: 8mm; }}
-                @page {{ size: A4; margin: 12mm; }}
-            }}
-        </style>
-    </head>
-    <body>
-
-    <div class="header">
-        <h2>{nom_entreprise}</h2>
-        {f"<p>{adresse_entreprise}</p>" if adresse_entreprise else ""}
-        {f"<p>{ville_entreprise}</p>" if ville_entreprise else ""}
-        {f"<p>Tél: {telephone_entreprise}</p>" if telephone_entreprise else ""}
-        {f"<p>Email: {email_entreprise}</p>" if email_entreprise else ""}
-        {f"<p>NIF: {nif} | NIS: {nis} | NRC: {nrc}</p>" if nif or nis or nrc else ""}
-        <div class="title">{title}</div>
-    </div>
-
-    <div class="info-box">
-        <div class="info-line">
-            <span class="info-label">📄 N° Bon :</span>
-            <span>{self.bon_data.get('numero', '')}</span>
-        </div>
-        <div class="info-line">
-            <span class="info-label">📅 Date :</span>
-            <span>{self.bon_data.get('date_bon', '')}</span>
-        </div>
-        <div class="info-line">
-            <span class="info-label">👥 {tiers_label} :</span>
-            <span>{tiers_nom}</span>
-        </div>
-        <div class="info-line">
-            <span class="info-label">📊 Statut :</span>
-            <span style="color: {'#22c55e' if self.bon_data.get('statut') == 'Validé' else '#ef4444'}; font-weight: bold;">{self.bon_data.get('statut', '')}</span>
-        </div>
-    </div>
-
-    <table>
-        <thead>
-            <tr>
-                <th>Code</th>
-                <th>Produit</th>
-                <th style="text-align:center;">Qté unités</th>
-                <th style="text-align:center;">Qté cartons</th>
-                <th style="text-align:center;">Unité</th>
-                <th style="text-align:right;">Prix Unit.</th>
-                <th style="text-align:center;">Remise</th>
-                <th style="text-align:right;">Total</th>
-            </tr>
-        </thead>
-        <tbody>
-            {lignes_html}
-        </tbody>
-    </table>
-
-    <!-- ========== ZONE RÉCAPITULATIVE ========== -->
-    <div class="recap-box">
-        <div class="recap-line">
-            <span class="recap-label">Total HT :</span>
-            <span class="recap-value">{total_ht:,.2f} DA</span>
-        </div>
-        <div class="recap-line">
-            <span class="recap-label">TVA :</span>
-            <span class="recap-value" style="color: #f97316;">{total_tva:,.2f} DA</span>
-        </div>
-        <div style="border-top: 1px dashed #22c55e; margin: 5px 0;"></div>
-        <div class="recap-line">
-            <span class="recap-label" style="font-size: 14px;">TOTAL TTC :</span>
-            <span class="recap-value" style="color: #22c55e; font-size: 16px;">{total_ttc:,.2f} DA</span>
-        </div>
-    </div>
-
-    <div class="footer">
-        Merci pour votre confiance !<br>
-        Document généré le {datetime.now().strftime('%d/%m/%Y à %H:%M:%S')}
-    </div>
-
-    </body>
-    </html>"""
-        with open(path, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-        return True
+        conn = get_conn()
+        remises = conn.execute(
+            "SELECT * FROM remises WHERE vente_id = ?" if self.bon_type == "vente"
+            else "SELECT * FROM remises WHERE achat_id = ?",
+            (self.bon_id,)
+        ).fetchall()
+        conn.close()
+        remises_dicts = [dict(r) for r in remises]
+        lignes_dicts  = [dict(l) for l in self.lignes_data]
+        return hr.build_bon_html(
+            profil        = profil,
+            bon_data      = self.bon_data,
+            lignes        = lignes_dicts,
+            remises       = remises_dicts,
+            bon_type      = self.bon_type,
+        )
+ 
+    def print_bon(self):
+        viewer = hr.DocumentViewer(self)
+        viewer.show(self._get_html(), f"BON N°{self.bon_data['numero']}")
+ 
+    def export_pdf(self):
+        viewer = hr.DocumentViewer(self)
+        viewer.export_pdf(
+            self._get_html(),
+            default_name=f"Bon_{self.bon_data['numero']}.pdf",
+        )
 
 # ========== APPLICATION PRINCIPALE ==========
 
@@ -7081,8 +7751,6 @@ class App(tk.Tk):
         self.bind("<Escape>", self.quit_fullscreen)
         
         init_db()
-        prix_niveaux.migrer_prix_niveaux()  
-
         self._pages = {}
         self._build()
 
@@ -7109,7 +7777,7 @@ class App(tk.Tk):
         logo_frame.pack(fill="x")
         lbl(logo_frame, "📦", 28).pack()
         lbl(logo_frame, "Gestion Stock", 12, True).pack()
-        lbl(logo_frame, "v1.0", 8, color=CLR_MUTED).pack()
+        #lbl(logo_frame, "v1.0", 8, color=CLR_MUTED).pack()
 
         ttk.Separator(self.sidebar, orient="horizontal").pack(fill="x", padx=15, pady=5)
 
@@ -7134,6 +7802,8 @@ class App(tk.Tk):
             None,
             ("📊", "Situation Clients", "sit_clients"),
             ("📊", "Situation Fournis.", "sit_fourn"),
+            ("📊", "Stats Achats", "stats_achats"),
+            ("📊", "Stats Ventes", "stats_ventes"),
             None,
             ("🏢", "Profils Entreprise", "profils")
         ]
@@ -7201,7 +7871,10 @@ class App(tk.Tk):
                 self._pages[key] = SituationPage(self.main, "fournisseur")
             elif key == "profils":
                 self._pages[key] = GestionProfilsPage(self.main)
-
+            elif key == "stats_ventes":
+                self._pages[key] = StatistiquesVentesPage(self.main)    
+            elif key == "stats_achats":  # <-- NOUVEAU
+                self._pages[key] = StatistiquesAchatsPage(self.main)
         page = self._pages[key]
         page.pack(fill="both", expand=True)
         if hasattr(page, "refresh"):
@@ -7524,7 +8197,7 @@ class VersementDialog(tk.Toplevel):
             else:
                 nouveau_solde = solde_actuel - montant
             self.nouveau_solde_var.set(f"{nouveau_solde:,.2f} DA")
-        except:
+        except (ValueError, KeyError):
             pass
     
     def save(self):
@@ -7976,7 +8649,6 @@ class RetourPage(tk.Frame):
         headers = ["Numéro", "Date", self.tiers_label, "Total", "Motif", "Bon associé"]
         print_preview(data, f"LISTE DES RETOURS", headers)
 
-
 class RetourDialog(tk.Toplevel):
     """Dialogue de création de retour"""
     
@@ -7995,12 +8667,20 @@ class RetourDialog(tk.Toplevel):
         
         self.title(f"Nouveau Retour - {self.tiers_label}")
         self.configure(bg=CLR_BG)
-        self.geometry("900x700")
+        
+        # MAXIMISER AVEC BARRE DES TÂCHES VISIBLE
+        self.state('zoomed')
+        
         self._build()
-        center_window(self, 900, 700)
+        self.update_idletasks()
     
     def _build(self):
-        main_frame = tk.Frame(self, bg=CLR_BG, padx=20, pady=20)
+        # CONTENEUR PRINCIPAL
+        main_container = tk.Frame(self, bg=CLR_BG)
+        main_container.pack(fill="both", expand=True)
+        
+        # CONTENU PRINCIPAL AVEC PADDING
+        main_frame = tk.Frame(main_container, bg=CLR_BG, padx=20, pady=20)
         main_frame.pack(fill="both", expand=True)
         
         lbl(main_frame, f"↩️ NOUVEAU RETOUR {self.tiers_label.upper()}", 14, True, CLR_ACCENT).pack(pady=(0,15))
@@ -8044,7 +8724,7 @@ class RetourDialog(tk.Toplevel):
         bon_combo.pack(side="left", padx=10, fill="x", expand=True)
         self.bon_var.trace_add("write", self.on_bon_selected)
         
-        # ✅ AJOUTER ICI — sélecteur de tiers direct (pour retour sans bon)
+        # Sélecteur de tiers direct
         tiers_direct_frame = tk.Frame(bon_frame, bg=CLR_CARD)
         tiers_direct_frame.pack(fill="x", pady=5)
 
@@ -8075,16 +8755,18 @@ class RetourDialog(tk.Toplevel):
 
         self.tiers_direct_var.trace_add("write", on_tiers_direct)
         
-        # Section produit à retourner
+        # ✅ Section produit à retourner - TOUT SUR UNE SEULE LIGNE
         prod_frame = tk.LabelFrame(main_frame, text="2. Produit à retourner", 
                                    bg=CLR_CARD, fg=CLR_ACCENT, font=("Segoe UI", 10, "bold"),
                                    padx=15, pady=10)
         prod_frame.pack(fill="x", pady=10)
         
+        # ✅ LIGNE UNIQUE POUR TOUS LES CHAMPS + BOUTON AJOUTER
+        row_saisie = tk.Frame(prod_frame, bg=CLR_CARD)
+        row_saisie.pack(fill="x", pady=5)
+        
         # Produit
-        row1 = tk.Frame(prod_frame, bg=CLR_CARD)
-        row1.pack(fill="x", pady=5)
-        lbl(row1, "Produit:", 9, False, CLR_MUTED).pack(side="left", padx=5)
+        lbl(row_saisie, "Produit:", 9, False, CLR_MUTED).pack(side="left", padx=5)
         
         conn = get_conn()
         prods = conn.execute("SELECT id, code, designation, prix_vente, unite, stock_actuel FROM produits WHERE actif = 1 ORDER BY designation").fetchall()
@@ -8098,71 +8780,137 @@ class RetourDialog(tk.Toplevel):
             prod_liste.append(display)
         
         self.prod_var = tk.StringVar()
-        prod_combo = combo(row1, prod_liste, width=35, textvariable=self.prod_var)
-        prod_combo.pack(side="left", padx=10)
+        prod_combo = combo(row_saisie, prod_liste, width=25, textvariable=self.prod_var)
+        prod_combo.pack(side="left", padx=5)
         
         # Quantité
-        lbl(row1, "Quantité:", 9, False, CLR_MUTED).pack(side="left", padx=(20,5))
+        lbl(row_saisie, "Qté:", 9, False, CLR_MUTED).pack(side="left", padx=(10,5))
         self.qty_var = tk.StringVar(value="1")
-        entry(row1, width=10, textvariable=self.qty_var).pack(side="left", padx=5)
+        entry(row_saisie, width=6, textvariable=self.qty_var).pack(side="left", padx=5)
         
         # Prix unitaire
-        lbl(row1, "Prix unitaire:", 9, False, CLR_MUTED).pack(side="left", padx=(20,5))
+        lbl(row_saisie, "Prix:", 9, False, CLR_MUTED).pack(side="left", padx=(10,5))
         self.prix_var = tk.StringVar()
-        entry(row1, width=12, textvariable=self.prix_var).pack(side="left", padx=5)
-        lbl(row1, "DA", 9, False, CLR_MUTED).pack(side="left")
+        entry(row_saisie, width=10, textvariable=self.prix_var).pack(side="left", padx=5)
+        lbl(row_saisie, "DA", 9, False, CLR_MUTED).pack(side="left")
         
-        # Motif
-        row2 = tk.Frame(prod_frame, bg=CLR_CARD)
-        row2.pack(fill="x", pady=5)
-        lbl(row2, "Motif du retour:", 9, False, CLR_MUTED).pack(side="left", padx=5)
+        # ✅ BOUTON AJOUTER EN LIGNE (à droite)
+        btn_ajouter = tk.Button(row_saisie, text="➕ AJOUTER", command=self.ajouter_ligne,
+                               bg=CLR_GREEN, fg="white", relief="flat", 
+                               font=("Segoe UI", 9, "bold"),
+                               padx=12, pady=4, cursor="hand2")
+        btn_ajouter.pack(side="right", padx=5)
+        
+        # ✅ Motif sur une ligne séparée (en dessous)
+        row_motif = tk.Frame(prod_frame, bg=CLR_CARD)
+        row_motif.pack(fill="x", pady=5)
+        lbl(row_motif, "Motif du retour:", 9, False, CLR_MUTED).pack(side="left", padx=5)
         self.motif_var = tk.StringVar()
-        entry(row2, width=50, textvariable=self.motif_var).pack(side="left", padx=10, fill="x", expand=True)
+        entry(row_motif, width=60, textvariable=self.motif_var).pack(side="left", padx=10, fill="x", expand=True)
         
-        # Bouton ajouter
-        tk.Button(prod_frame, text="➕ AJOUTER", command=self.ajouter_ligne,
-                 bg=CLR_GREEN, fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
-                 padx=15, pady=5, cursor="hand2").pack(pady=10)
+        # ✅ CONTENEUR TABLEAU + BOUTONS DROITE (Layout horizontal)
+        content_frame = tk.Frame(main_frame, bg=CLR_BG)
+        content_frame.pack(fill="both", expand=True, pady=10)
         
-        # Tableau des lignes
+        # ✅ TABLEAU À GAUCHE
+        tableau_frame = tk.Frame(content_frame, bg=CLR_BG)
+        tableau_frame.pack(side="left", fill="both", expand=True)
+        
         cols = ["Produit", "Quantité", "Prix unitaire", "Total"]
-        widths = [350, 80, 100, 120]
-        tf, self.tree = make_tree(main_frame, cols, widths)
-        tf.pack(fill="both", expand=True, pady=10)
+        widths = [400, 100, 120, 150]
+        tf, self.tree = make_tree(tableau_frame, cols, widths)
+        tf.pack(fill="both", expand=True)
         
-        # Footer
-        foot_frame = tk.Frame(main_frame, bg=CLR_BG)
-        foot_frame.pack(fill="x", pady=10)
+        # ✅ PANEL DES BOUTONS À DROITE
+        panel_droite = tk.Frame(content_frame, bg=CLR_BG, width=250)
+        panel_droite.pack(side="right", fill="y", padx=(10, 0))
+        panel_droite.pack_propagate(False)
+        
+        # ✅ CADRE DES BOUTONS D'ACTION
+        actions_frame = tk.LabelFrame(panel_droite, text="⚡ ACTIONS", 
+                                     bg=CLR_CARD, fg=CLR_ACCENT,
+                                     font=("Segoe UI", 10, "bold"),
+                                     padx=10, pady=8)
+        actions_frame.pack(fill="x", pady=5)
+        
+        # Bouton Retirer ligne
+        btn_retirer = tk.Button(actions_frame, text="🗑 Retirer ligne", command=self.retirer_ligne,
+                               bg=CLR_RED, fg="white", relief="flat", 
+                               font=("Segoe UI", 9, "bold"), padx=10, pady=6,
+                               cursor="hand2", width=16)
+        btn_retirer.pack(pady=3)
+        
+        # Bouton Vider tout
+        btn_vider = tk.Button(actions_frame, text="🗑 Vider tout", command=self.vider_panier,
+                             bg=CLR_ORANGE, fg="white", relief="flat", 
+                             font=("Segoe UI", 9, "bold"), padx=10, pady=6,
+                             cursor="hand2", width=16)
+        btn_vider.pack(pady=3)
+        
+        # ✅ CADRE RÉCAPITULATIF
+        recap_frame = tk.LabelFrame(panel_droite, text="📊 RÉCAPITULATIF", 
+                                   bg=CLR_CARD, fg=CLR_GREEN,
+                                   font=("Segoe UI", 10, "bold"),
+                                   padx=10, pady=8)
+        recap_frame.pack(fill="x", pady=5)
         
         # Total
-        self.total_var = tk.StringVar(value="Total: 0.00 DA")
-        tk.Label(foot_frame, textvariable=self.total_var, bg=CLR_BG, 
-                fg=CLR_GREEN, font=("Segoe UI", 14, "bold")).pack(side="right", padx=10)
+        row_total = tk.Frame(recap_frame, bg=CLR_CARD)
+        row_total.pack(fill="x", pady=3)
+        lbl(row_total, "Total:", 10, True, CLR_MUTED).pack(side="left")
+        self.total_var = tk.StringVar(value="0.00 DA")
+        tk.Label(row_total, textvariable=self.total_var, bg=CLR_CARD, 
+                fg=CLR_GREEN, font=("Segoe UI", 14, "bold")).pack(side="right")
         
-        # Bouton retirer
-        tk.Button(foot_frame, text="🗑 Retirer ligne", command=self.retirer_ligne,
-                 bg=CLR_RED, fg="white", relief="flat", font=("Segoe UI", 9, "bold"),
-                 padx=12, pady=6, cursor="hand2").pack(side="left", padx=5)
+        # Nombre de lignes
+        row_nb = tk.Frame(recap_frame, bg=CLR_CARD)
+        row_nb.pack(fill="x", pady=3)
+        lbl(row_nb, "Lignes:", 9, True, CLR_MUTED).pack(side="left")
+        self.nb_lignes_var = tk.StringVar(value="0")
+        tk.Label(row_nb, textvariable=self.nb_lignes_var, bg=CLR_CARD, 
+                fg=CLR_ACCENT, font=("Segoe UI", 11, "bold")).pack(side="right")
         
-        # Boutons validation
-        btn_frame = tk.Frame(main_frame, bg=CLR_BG)
-        btn_frame.pack(fill="x", pady=10)
+        # ✅ CADRE BOUTONS DE VALIDATION
+        validation_frame = tk.LabelFrame(panel_droite, text="✅ VALIDATION", 
+                                        bg=CLR_CARD, fg=CLR_GREEN,
+                                        font=("Segoe UI", 10, "bold"),
+                                        padx=10, pady=8)
+        validation_frame.pack(fill="x", pady=5)
         
-        tk.Button(btn_frame, text="✅ VALIDER LE RETOUR", command=self.save,
-                 bg=CLR_GREEN, fg="white", relief="flat", font=("Segoe UI", 11, "bold"),
-                 padx=25, pady=10, cursor="hand2").pack(side="left", padx=10, expand=True, fill="x")
+        # Bouton VALIDER
+        btn_valider = tk.Button(validation_frame, text="✅ VALIDER", 
+                               command=self.save,
+                               bg=CLR_GREEN, fg="white", relief="flat", 
+                               font=("Segoe UI", 10, "bold"),
+                               padx=15, pady=10, cursor="hand2", width=16)
+        btn_valider.pack(pady=3)
         
-        tk.Button(btn_frame, text="❌ ANNULER", command=self.destroy,
-                 bg=CLR_RED, fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
-                 padx=20, pady=10, cursor="hand2").pack(side="right", padx=10)
+        # Bouton ANNULER
+        btn_annuler = tk.Button(validation_frame, text="❌ ANNULER", 
+                               command=self.destroy,
+                               bg=CLR_RED, fg="white", relief="flat", 
+                               font=("Segoe UI", 10, "bold"),
+                               padx=15, pady=10, cursor="hand2", width=16)
+        btn_annuler.pack(pady=3)
+        
+        # ✅ Raccourcis clavier
+        shortcuts_frame = tk.Frame(panel_droite, bg=CLR_BG)
+        shortcuts_frame.pack(fill="x", pady=(5, 0))
+        tk.Label(shortcuts_frame, 
+                text="Entrée (Ajouter) | Suppr (Retirer)", 
+                bg=CLR_BG, fg=CLR_MUTED, font=("Segoe UI", 8)).pack()
+        
+        # Bindings des raccourcis clavier
+        self.bind('<Return>', lambda e: self.ajouter_ligne())
+        self.bind('<Delete>', lambda e: self.retirer_ligne())
+        
+        # ✅ Initialisation
+        self.refresh_panier()
     
     def on_bon_selected(self, *args):
         key = self.bon_var.get()
         if key != "-- Aucun --" and key in self.bons_map:
             self.bon_selected = self.bons_map[key]
-            # Charger automatiquement le tiers
-            tiers_nom = self.bon_selected["tiers_nom"]
-            self.tiers_var = tk.StringVar(value=tiers_nom)
     
     def ajouter_ligne(self):
         prod_key = self.prod_var.get()
@@ -8185,14 +8933,7 @@ class RetourDialog(tk.Toplevel):
             return
         
         prod = self.prod_map[prod_key]
-        
-        # Vérifier le stock disponible pour un retour vente
-        if self.retour_type == "vente":
-            if qty > prod["stock_actuel"]:
-                messagebox.showerror("Stock insuffisant", 
-                                    f"Stock disponible: {prod['stock_actuel']:.2f}\n"
-                                    f"Quantité retournée: {qty:.2f}")
-                return
+
         
         total = qty * prix
         
@@ -8217,6 +8958,14 @@ class RetourDialog(tk.Toplevel):
         del self.lignes[idx]
         self.refresh_panier()
     
+    def vider_panier(self):
+        if not self.lignes:
+            messagebox.showinfo("Information", "Le panier est déjà vide")
+            return
+        if messagebox.askyesno("Confirmation", "Vider tout le panier ?"):
+            self.lignes = []
+            self.refresh_panier()
+    
     def refresh_panier(self):
         self.tree.delete(*self.tree.get_children())
         total = 0
@@ -8228,7 +8977,8 @@ class RetourDialog(tk.Toplevel):
                 f"{l['total']:.2f}"
             ))
             total += l["total"]
-        self.total_var.set(f"Total: {total:,.2f} DA")
+        self.total_var.set(f"{total:,.2f} DA")
+        self.nb_lignes_var.set(str(len(self.lignes)))
     
     def save(self):
         if not self.lignes:
@@ -8240,11 +8990,10 @@ class RetourDialog(tk.Toplevel):
         dt = date.today().strftime("%Y-%m-%d")
         motif = self.motif_var.get().strip()
         
-        # ✅ CORRECTION : distinguer ID du bon et ID du tiers
+        # Distinguer ID du bon et ID du tiers
         if self.bon_selected:
-            bon_id = self.bon_selected["id"]  # ID du bon
+            bon_id = self.bon_selected["id"]
             
-            # Récupérer l'ID du tiers depuis le bon
             conn_tmp = get_conn()
             if self.retour_type == "vente":
                 row = conn_tmp.execute(
@@ -8262,7 +9011,6 @@ class RetourDialog(tk.Toplevel):
                 messagebox.showerror("Erreur", "Impossible de retrouver le tiers du bon")
                 return
         else:
-            # ✅ Retour sans bon : utiliser le tiers sélectionné directement
             if not hasattr(self, 'tiers_id_sans_bon') or not self.tiers_id_sans_bon:
                 messagebox.showerror(
                     "Erreur",
@@ -8299,7 +9047,6 @@ class RetourDialog(tk.Toplevel):
                     (retour_id, l["produit_id"], l["quantite"], l["prix"], l["total"])
                 )
                 if self.retour_type == "vente":
-                    # Retour vente → remettre en stock + diminuer dette client
                     conn.execute(
                         "UPDATE produits SET stock_actuel = stock_actuel + ? WHERE id=?",
                         (l["quantite"], l["produit_id"])
@@ -8309,7 +9056,6 @@ class RetourDialog(tk.Toplevel):
                         (l["total"], tiers_id)
                     )
                 else:
-                    # Retour achat → retirer du stock + diminuer dette fournisseur
                     conn.execute(
                         "UPDATE produits SET stock_actuel = stock_actuel - ? WHERE id=?",
                         (l["quantite"], l["produit_id"])
@@ -9125,372 +9871,48 @@ class SituationPage(tk.Frame):
                 webbrowser.open(filename)
     
     def print_filtered(self):
-        """Imprimer les données filtrées avec style professionnel"""
+        from gestion_stock import get_profil_by_type
         transactions, total_ops, total_ret, total_vers = self.get_filtered_transactions()
-        
         if not transactions:
+            from tkinter import messagebox
             messagebox.showwarning("Avertissement", "Aucune donnée à imprimer")
             return
-        
-        html_content = self._generate_situation_html()
-        html_file = tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8')
-        try:
-            html_file.write(html_content)
-            html_file.close()
-            webbrowser.open(html_file.name)
-            messagebox.showinfo("Impression", 
-                                "Document ouvert dans le navigateur.\n"
-                                "Utilisez Ctrl+P pour imprimer.")
-        except Exception as e:
-            messagebox.showerror("Erreur", f"Erreur: {str(e)}")
-        finally:
-            self.after(60000, lambda: os.unlink(html_file.name) if os.path.exists(html_file.name) else None)
-    
-    def _generate_situation_html(self):
-        """Génère le HTML stylisé pour la situation (style bon d'achat/vente)"""
-        
-        transactions, total_ops, total_ret, total_vers = self.get_filtered_transactions()
-        
-        # Récupérer le profil entreprise
         profil = get_profil_by_type("situation")
-        if profil:
-            nom_entreprise = profil.get("nom", "") or "VOTRE SOCIÉTÉ"
-            adresse_entreprise = profil.get("adresse", "") or ""
-            telephone_entreprise = profil.get("telephone", "") or ""
-            email_entreprise = profil.get("email", "") or ""
-            ville_entreprise = profil.get("ville", "") or ""
-            nif = profil.get("nif", "") or ""
-            nis = profil.get("nis", "") or ""
-            nrc = profil.get("nrc", "") or ""
-        else:
-            nom_entreprise = "VOTRE SOCIÉTÉ"
-            adresse_entreprise = telephone_entreprise = email_entreprise = ville_entreprise = ""
-            nif = nis = nrc = ""
-        
-        # Calculer le solde cumulé
-        solde_cumule = 0
-        transactions_with_balance = []
-        for t in transactions:
-            solde_cumule += t["montant"]
-            transactions_with_balance.append({
-                **dict(t),
-                "solde_cumule": solde_cumule
-            })
-        
-        # Générer les lignes du tableau
-        lignes_html = ""
-        for t in transactions_with_balance:
-            # Déterminer la couleur et l'icône selon le type
-            if t["type"] == "VENTE":
-                color = "#22c55e"
-                icon = "🛒"
-            elif t["type"] == "ACHAT":
-                color = "#3b82f6"
-                icon = "📦"
-            elif t["type"] == "RETOUR":
-                color = "#f97316"
-                icon = "↩️"
-            else:  # VERSEMENT
-                color = "#8b5cf6"
-                icon = "💳"
-            
-            lignes_html += f"""
-            <tr style="border-bottom: 1px solid #e5e7eb;">
-                <td style="padding: 8px 12px; text-align: center;">{t['date']}</td>
-                <td style="padding: 8px 12px; text-align: center;">
-                    <span style="color: {color}; font-weight: bold;">{icon} {t['type']}</span>
-                </td>
-                <td style="padding: 8px 12px; text-align: center;">{t['document']}</td>
-                <td style="padding: 8px 12px; text-align: right; font-weight: bold; color: {color};">
-                    {t['montant']:+,.2f} DA
-                </td>
-                <td style="padding: 8px 12px; text-align: right; font-weight: bold; color: #1a1a2e;">
-                    {t['solde_cumule']:,.2f} DA
-                </td>
-            </tr>
-            """
-        
-        # Générer le HTML complet
-        html_content = f"""<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>SITUATION DE {self.current_tiers_nom.upper()}</title>
-    <style>
-        body {{
-            font-family: 'Segoe UI', Arial, sans-serif;
-            margin: 20px;
-            color: #1a1a2e;
-            font-size: 13px;
-            background: #f8f9fa;
-        }}
-        .container {{
-            max-width: 1100px;
-            margin: 0 auto;
-            background: white;
-            padding: 30px;
-            border-radius: 12px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }}
-        .header {{
-            text-align: center;
-            margin-bottom: 25px;
-            padding-bottom: 20px;
-            border-bottom: 3px solid #3b82f6;
-        }}
-        .header h1 {{
-            margin: 5px 0;
-            font-size: 22px;
-            color: #1a1a2e;
-        }}
-        .header h2 {{
-            margin: 5px 0;
-            font-size: 18px;
-            color: #3b82f6;
-        }}
-        .header p {{
-            margin: 3px 0;
-            font-size: 12px;
-            color: #6b7280;
-        }}
-        .info-box {{
-            border: 1px solid #e5e7eb;
-            padding: 15px 20px;
-            margin: 15px 0;
-            border-radius: 8px;
-            background: #f9fafb;
-        }}
-        .info-grid {{
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 8px;
-        }}
-        .info-item {{
-            padding: 4px 0;
-        }}
-        .info-label {{
-            font-weight: bold;
-            color: #4b5563;
-            display: inline-block;
-            min-width: 140px;
-        }}
-        .info-value {{
-            color: #1a1a2e;
-        }}
-        .title {{
-            font-size: 16px;
-            font-weight: bold;
-            color: #3b82f6;
-            margin: 20px 0 10px 0;
-            padding: 10px;
-            background: #eff6ff;
-            border-radius: 6px;
-        }}
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-            margin: 10px 0;
-            border-radius: 8px;
-            overflow: hidden;
-        }}
-        th {{
-            background: #1e293b;
-            color: white;
-            padding: 10px 12px;
-            text-align: center;
-            font-weight: bold;
-            font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }}
-        td {{
-            padding: 8px 12px;
-            text-align: center;
-        }}
-        tr:nth-child(even) {{
-            background: #f8fafc;
-        }}
-        tr:hover {{
-            background: #f1f5f9;
-        }}
-        .total-row {{
-            background: #eef2ff !important;
-            font-weight: bold;
-        }}
-        .recap-box {{
-            margin-top: 20px;
-            padding: 15px 20px;
-            background: #f0fdf4;
-            border: 2px solid #22c55e;
-            border-radius: 10px;
-            display: inline-block;
-            width: 100%;
-        }}
-        .recap-grid {{
-            display: grid;
-            grid-template-columns: 1fr 1fr 1fr 1fr;
-            gap: 15px;
-        }}
-        .recap-item {{
-            text-align: center;
-            padding: 10px;
-            background: white;
-            border-radius: 8px;
-            border: 1px solid #e5e7eb;
-        }}
-        .recap-label {{
-            font-size: 11px;
-            color: #6b7280;
-            font-weight: bold;
-            text-transform: uppercase;
-        }}
-        .recap-value {{
-            font-size: 16px;
-            font-weight: bold;
-            margin-top: 5px;
-        }}
-        .footer {{
-            text-align: center;
-            margin-top: 25px;
-            padding-top: 15px;
-            border-top: 1px solid #e5e7eb;
-            font-size: 11px;
-            color: #9ca3af;
-        }}
-        .status-ok {{
-            color: #22c55e;
-            font-weight: bold;
-        }}
-        .status-warning {{
-            color: #ef4444;
-            font-weight: bold;
-        }}
-        .badge {{
-            display: inline-block;
-            padding: 2px 10px;
-            border-radius: 12px;
-            font-size: 11px;
-            font-weight: bold;
-        }}
-        .badge-vente {{
-            background: #dcfce7;
-            color: #16a34a;
-        }}
-        .badge-achat {{
-            background: #dbeafe;
-            color: #2563eb;
-        }}
-        .badge-retour {{
-            background: #fef3c7;
-            color: #d97706;
-        }}
-        .badge-versement {{
-            background: #ede9fe;
-            color: #7c3aed;
-        }}
-        @media print {{
-            body {{ margin: 0; padding: 0; background: white; }}
-            .container {{ box-shadow: none; border-radius: 0; padding: 15px; }}
-            .header {{ border-bottom-color: #1a1a2e; }}
-            th {{ background: #1a1a2e !important; }}
-            .recap-box {{ border-color: #1a1a2e; }}
-            @page {{ size: A4; margin: 10mm; }}
-            tr:nth-child(even) {{ background: #f8fafc; }}
-        }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        
-        <!-- ========== EN-TÊTE ========== -->
-        <div class="header">
-            <h1>{nom_entreprise}</h1>
-            {f'<p>{adresse_entreprise}</p>' if adresse_entreprise else ''}
-            {f'<p>{ville_entreprise}</p>' if ville_entreprise else ''}
-            {f'<p>Tél: {telephone_entreprise} | Email: {email_entreprise}</p>' if telephone_entreprise or email_entreprise else ''}
-            {f'<p>NIF: {nif} | NIS: {nis} | NRC: {nrc}</p>' if nif or nis or nrc else ''}
-            <h2>📊 SITUATION DE {self.current_tiers_nom.upper()}</h2>
-        </div>
-        
-        <!-- ========== INFORMATIONS ========== -->
-        <div class="info-box">
-            <div class="info-grid">
-                <div class="info-item">
-                    <span class="info-label">👤 {self.tiers_label} :</span>
-                    <span class="info-value">{self.current_tiers_nom}</span>
-                </div>
-                <div class="info-item">
-                    <span class="info-label">📅 Période :</span>
-                    <span class="info-value">{self.date_debut_var.get()} → {self.date_fin_var.get()}</span>
-                </div>
-               
-            </div>
-        </div>
-        
-        <!-- ========== RÉCAPITULATIF ========== -->
-        <div class="title">📈 RÉCAPITULATIF DES OPÉRATIONS</div>
-        <div class="recap-box">
-            <div class="recap-grid">
-                <div class="recap-item">
-                    <div class="recap-label">Total Opérations</div>
-                    <div class="recap-value" style="color: #3b82f6;">{total_ops:,.2f} DA</div>
-                </div>
-                <div class="recap-item">
-                    <div class="recap-label">Total Retours</div>
-                    <div class="recap-value" style="color: #f97316;">{total_ret:,.2f} DA</div>
-                </div>
-                <div class="recap-item">
-                    <div class="recap-label">Total Versements</div>
-                    <div class="recap-value" style="color: #8b5cf6;">{total_vers:,.2f} DA</div>
-                </div>
-                <div class="recap-item" style="border-color: #22c55e; background: #f0fdf4;">
-                    <div class="recap-label">⭐ Solde Final</div>
-                    <div class="recap-value" style="color: {'#22c55e' if solde_cumule >= 0 else '#ef4444'};">
-                        {solde_cumule:,.2f} DA
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <!-- ========== HISTORIQUE ========== -->
-        <div class="title">📜 HISTORIQUE DES TRANSACTIONS</div>
-        <table>
-            <thead>
-                <tr>
-                    <th style="width: 15%;">Date</th>
-                    <th style="width: 18%;">Type</th>
-                    <th style="width: 20%;">Document</th>
-                    <th style="width: 22%;">Montant</th>
-                    <th style="width: 25%;">Solde après</th>
-                </tr>
-            </thead>
-            <tbody>
-                {lignes_html if lignes_html else '<tr><td colspan="5" style="text-align: center; padding: 20px; color: #6b7280;">Aucune transaction trouvée</td></tr>'}
-                <!-- Ligne de total -->
-                <tr class="total-row">
-                    <td colspan="3" style="text-align: right; font-size: 14px; padding: 12px;">
-                        <strong>TOTAL GÉNÉRAL</strong>
-                    </td>
-                    <td style="text-align: right; font-weight: bold; color: #3b82f6; padding: 12px;">
-                        {total_ops - total_ret - total_vers:,.2f} DA
-                    </td>
-                    <td style="text-align: right; font-weight: bold; color: {'#22c55e' if solde_cumule >= 0 else '#ef4444'}; padding: 12px;">
-                        {solde_cumule:,.2f} DA
-                    </td>
-                </tr>
-            </tbody>
-        </table>
-        
-        <!-- ========== FOOTER ========== -->
-        <div class="footer">
-            📅 Document généré le {datetime.now().strftime('%d/%m/%Y à %H:%M:%S')}<br>
-            📄 {nom_entreprise} - Tous droits réservés
-        </div>
-        
-    </div>
-</body>
-</html>"""
-        return html_content
+        html = hr.build_situation_html(
+            profil      = profil,
+            tiers_nom   = self.current_tiers_nom,
+            tiers_label = self.tiers_label,
+            transactions= [dict(t) for t in transactions],
+            total_ops   = total_ops,
+            total_ret   = total_ret,
+            total_vers  = total_vers,
+            date_debut  = self.date_debut_var.get(),
+            date_fin    = self.date_fin_var.get(),
+        )
+        viewer = hr.DocumentViewer(self)
+        viewer.show(html, f"Situation {self.current_tiers_nom}")
+ 
+    def export_filtered_html(self):
+        from gestion_stock import get_profil_by_type
+        transactions, total_ops, total_ret, total_vers = self.get_filtered_transactions()
+        if not transactions:
+            from tkinter import messagebox
+            messagebox.showwarning("Avertissement", "Aucune donnée à exporter")
+            return
+        profil = get_profil_by_type("situation")
+        html = hr.build_situation_html(
+            profil      = profil,
+            tiers_nom   = self.current_tiers_nom,
+            tiers_label = self.tiers_label,
+            transactions= [dict(t) for t in transactions],
+            total_ops   = total_ops,
+            total_ret   = total_ret,
+            total_vers  = total_vers,
+            date_debut  = self.date_debut_var.get(),
+            date_fin    = self.date_fin_var.get(),
+        )
+        viewer = hr.DocumentViewer(self)
+        viewer.export_html(html, f"situation_{self.current_tiers_nom}.html")
 class GestionProfilsPage(tk.Frame):
     """Page de gestion des profils entreprise"""
     
@@ -9591,7 +10013,7 @@ class GestionProfilsPage(tk.Frame):
             try:
                 with open(config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)
-            except:
+            except (json.JSONDecodeError, OSError):
                 pass
         
         conn = get_conn()

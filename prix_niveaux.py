@@ -45,27 +45,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 import sqlite3
 
-# ─── Toutes les constantes de couleur sont supposées déjà définies ───────────
-# CLR_BG, CLR_CARD, CLR_ACCENT, CLR_GREEN, CLR_RED, CLR_ORANGE,
-# CLR_TEXT, CLR_MUTED, CLR_INPUT, CLR_BORDER
-# Fonctions supposées déjà définies : get_conn, lbl, entry, combo,
-# make_tree, center_window, parse_decimal, next_numero, valider_date
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  MIGRATION BASE DE DONNÉES
-# ══════════════════════════════════════════════════════════════════════════════
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-MODULE PRIX MULTI-NIVEAUX
-==========================
-"""
-
-import tkinter as tk
-from tkinter import ttk, messagebox
-import sqlite3
-
 # ========== DÉFINITIONS DES COULEURS ==========
 CLR_BG      = "#1e2736"
 CLR_SIDEBAR = "#16202e"
@@ -104,9 +83,13 @@ def parse_decimal(value):
         return 0.0
 
 def get_conn():
-    """Connexion à la base de données"""
-    import sqlite3
-    conn = sqlite3.connect("gestion_stock.db", timeout=10)
+    """Connexion à la base de données (même chemin que gestion_stock.py / exe)."""
+    try:
+        import gestion_stock
+        db_path = gestion_stock.DB_PATH
+    except ImportError:
+        db_path = "gestion_stock.db"
+    conn = sqlite3.connect(db_path, timeout=10)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode=WAL")
     conn.row_factory = sqlite3.Row
