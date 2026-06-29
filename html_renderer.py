@@ -723,10 +723,13 @@ def build_inventaire_html(rows: list, titre: str = "Inventaire") -> str:
 def build_situation_html(profil, tiers_nom: str, tiers_label: str,
                          transactions: list, total_ops: float,
                          total_ret: float, total_vers: float,
-                         date_debut: str, date_fin: str) -> str:
+                         date_debut: str, date_fin: str,
+                         total_si: float = 0) -> str: 
+
     """Génère le HTML de la situation financière d'un client/fournisseur."""
     titre = f"SITUATION DE {tiers_nom.upper()}"
-    solde_final = total_ops - total_ret - total_vers
+    solde_final = total_si + total_ops - total_ret - total_vers
+
 
     kpi_html = f"""
     <div class="kpi-grid">
@@ -808,8 +811,8 @@ def build_situation_html(profil, tiers_nom: str, tiers_label: str,
     <tfoot>
       <tr>
         <td colspan="3" class="text-right">Total général</td>
-        <td class="text-right">{_fmt(total_ops - total_ret - total_vers)} DA</td>
-        <td class="text-right">{_fmt(solde_final)} DA</td>
+        <td class="text-right">{_fmt(solde_final)} DA</td>  <!-- ✅ Utiliser solde_final -->
+        <td class="text-right">{_fmt(solde_final)} DA</td>  <!-- ✅ Utiliser solde_final -->
       </tr>
     </tfoot>
   </table>
