@@ -275,41 +275,60 @@ def build_bon_html(profil, bon_data: dict, lignes: list, remises: list,
                    bon_type: str = "vente") -> str:
     """
     Génère le HTML complet d'un bon d'achat ou de vente.
-    `bon_data` doit contenir : numero, date_bon, statut, tiers (nom),
-      total, [date_livraison, num_facture_fournisseur, num_bl_fournisseur]
-    `lignes` : liste de dicts avec designation, quantite, facteur_conversion,
-               unite, prix_unitaire, total.
-    `remises`: liste de dicts (produit_id, valeur, motif, total_avant, total_apres)
     """
     titre = f"BON D'ACHAT N° {bon_data['numero']}" if bon_type == "achat" \
             else f"BON DE VENTE N° {bon_data['numero']}"
 
     tiers_label = "Fournisseur" if bon_type == "achat" else "Client"
 
-    # ── info-box gauche : doc
-    doc_rows = f"""
-    <div class="info-row"><span class="info-label">N° bon :</span><span class="info-val">{bon_data['numero']}</span></div>
-    <div class="info-row"><span class="info-label">Date :</span><span class="info-val">{bon_data.get('date_bon','')}</span></div>
-    <div class="info-row"><span class="info-label">Statut :</span><span class="info-val">{_badge(bon_data.get('statut',''))}</span></div>
+    # ============================================================
+    # ✅ EN-TÊTE COMPACT - 1 LIGNE POUR LE TIERS
+    # ============================================================
+    # Informations du document (gauche)
+    doc_info = f"""
+    <div class="info-item">
+        <span class="info-label">N° bon :</span>
+        <span class="info-val">{bon_data['numero']}</span>
+    </div>
+    <div class="info-item">
+        <span class="info-label">Date :</span>
+        <span class="info-val">{bon_data.get('date_bon','')}</span>
+    </div>
+    <div class="info-item">
+        <span class="info-label">Statut :</span>
+        <span class="info-val">{_badge(bon_data.get('statut',''))}</span>
+    </div>
     """
+    
+    # Informations du tiers (droite)
+    tiers_info = f"""
+    <div class="info-item">
+        <span class="info-label">{tiers_label} :</span>
+        <span class="info-val" style="font-weight:600;color:#1a1a2e;">{bon_data.get('tiers','')}</span>
+    </div>
+    """
+    
+    # Informations spécifiques aux achats (affichées en dessous)
+    achat_info = ""
     if bon_type == "achat":
-        dl = bon_data.get("date_livraison") or "—"
-        ff = bon_data.get("num_facture_fournisseur") or "—"
-        bl = bon_data.get("num_bl_fournisseur") or "—"
-        doc_rows += f"""
-    <div class="info-row"><span class="info-label">Date livraison :</span><span class="info-val">{dl}</span></div>
-    <div class="info-row"><span class="info-label">N° Fact. Fourn. :</span><span class="info-val">{ff}</span></div>
-    <div class="info-row"><span class="info-label">N° BL Fourn. :</span><span class="info-val">{bl}</span></div>
-    <div class="info-row"><span class="info-label">Ancien solde :</span><span class="info-val">{_fmt(bon_data.get('ancien_solde',0))} DA</span></div>
-    <div class="info-row"><span class="info-label">Nouveau solde :</span><span class="info-val">{_fmt(bon_data.get('nouveau_solde',0))} DA</span></div>
+        achat_info = f"""
+    <div class="info-row-compact">
+        <span class="info-label">📅 Livraison :</span>
+        <span class="info-val">{bon_data.get('date_livraison') or '—'}</span>
+        <span class="info-label" style="margin-left:20px;">📄 Fact. Fourn. :</span>
+        <span class="info-val">{bon_data.get('num_facture_fournisseur') or '—'}</span>
+        <span class="info-label" style="margin-left:20px;">🚚 BL Fourn. :</span>
+        <span class="info-val">{bon_data.get('num_bl_fournisseur') or '—'}</span>
+    </div>
+    <div class="info-row-compact">
+        <span class="info-label">💰 Ancien solde :</span>
+        <span class="info-val" style="color:#f97316;">{_fmt(bon_data.get('ancien_solde',0))} DA</span>
+        <span class="info-label" style="margin-left:20px;">💰 Nouveau solde :</span>
+        <span class="info-val" style="color:#22c55e;font-weight:600;">{_fmt(bon_data.get('nouveau_solde',0))} DA</span>
+    </div>
     """
 
-    # ── info-box droite : tiers
-    tiers_rows = f"""
-    <div class="info-row"><span class="info-label">{tiers_label} :</span><span class="info-val">{bon_data.get('tiers','')}</span></div>
-    """
-
-    # ── lignes du tableau
+    # ── lignes du tableau (inchangé) ──
     remises_dict = {r.get("produit_id"): r for r in remises if r.get("produit_id")}
     rows_html = ""
     total_ht = total_tva = 0.0
@@ -331,7 +350,6 @@ def build_bon_html(profil, bon_data: dict, lignes: list, remises: list,
 
         rows_html += f"""
         <tr>
-          <td>{l.get('code','')}</td>
           <td>{l.get('designation','')}</td>
           <td class="text-center">{qte_base:.2f}</td>
           <td class="text-center">{qte_carton:.2f}</td>
@@ -345,7 +363,7 @@ def build_bon_html(profil, bon_data: dict, lignes: list, remises: list,
 
     total_ttc = total_ht + total_tva
 
-    # ── bloc récapitulatif
+    # ── récapitulatif ──
     recap_html = f"""
     <div class="recap">
       <div class="recap-row">
@@ -369,33 +387,122 @@ def build_bon_html(profil, bon_data: dict, lignes: list, remises: list,
       Document généré le {datetime.now().strftime('%d/%m/%Y à %H:%M:%S')}
     </div>"""
 
+    # ============================================================
+    # ✅ NOUVELLE MISE EN PAGE AVEC CSS INTÉGRÉ
+    # ============================================================
     return f"""<!DOCTYPE html>
 <html lang="fr">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{titre}</title>
-  <style>{COMMON_CSS}</style>
+  <style>
+    {COMMON_CSS}
+    
+    /* ============================================================
+       STYLES COMPACTS POUR L'EN-TÊTE
+       ============================================================ */
+    .header-compact {{
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 20px;
+        margin: 10px 0 15px 0;
+        padding: 12px 16px;
+        background: #f8fafc;
+        border-radius: 8px;
+        border: 0.5px solid #e5e7eb;
+        flex-wrap: wrap;
+    }}
+    
+    .header-left, .header-right {{
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+    }}
+    
+    .info-item {{
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        padding: 2px 0;
+    }}
+    
+    .info-row-compact {{
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12px;
+        padding: 2px 0;
+        flex-wrap: wrap;
+    }}
+    
+    .info-label {{
+        color: #6b7280;
+        font-weight: 500;
+        min-width: auto;
+    }}
+    
+    .info-val {{
+        color: #1a1a2e;
+        font-weight: 400;
+    }}
+    
+    /* Séparateur entre les sections */
+    .header-divider {{
+        width: 1px;
+        background: #e5e7eb;
+        align-self: stretch;
+        margin: 0 10px;
+    }}
+    
+    @media (max-width: 700px) {{
+        .header-compact {{
+            flex-direction: column;
+        }}
+        .header-divider {{
+            display: none;
+        }}
+    }}
+  </style>
 </head>
 <body>
 <div class="container">
   {header_html}
 
-  <div class="info-grid">
-    <div class="info-box">
-      <h3>Document</h3>
-      {doc_rows}
+  <!-- ========== EN-TÊTE COMPACT ========== -->
+  <div class="header-compact">
+    <div class="header-left">
+      <div class="info-item">
+        <span class="info-label">📄 N° bon :</span>
+        <span class="info-val" style="font-weight:600;color:#3b82f6;">{bon_data['numero']}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">📅 Date :</span>
+        <span class="info-val">{bon_data.get('date_bon','')}</span>
+      </div>
+      <div class="info-item">
+        <span class="info-label">📌 Statut :</span>
+        <span class="info-val">{_badge(bon_data.get('statut',''))}</span>
+      </div>
     </div>
-    <div class="info-box">
-      <h3>{tiers_label}</h3>
-      {tiers_rows}
+    
+    <div class="header-divider"></div>
+    
+    <div class="header-right">
+      <div class="info-item">
+        <span class="info-label">👤 {tiers_label} :</span>
+        <span class="info-val" style="font-weight:600;color:#1a1a2e;">{bon_data.get('tiers','')}</span>
+      </div>
+      {achat_info if bon_type == "achat" else ""}
     </div>
   </div>
 
+  <!-- ========== TABLEAU ========== -->
   <table class="doc-table">
     <thead>
       <tr>
-        <th>Code</th>
         <th>Désignation</th>
         <th class="text-center">Qté unités</th>
         <th class="text-center">Qté cartons</th>
@@ -410,7 +517,7 @@ def build_bon_html(profil, bon_data: dict, lignes: list, remises: list,
     <tbody>{rows_html}</tbody>
     <tfoot>
       <tr>
-        <td colspan="7" class="text-right">Totaux</td>
+        <td colspan="6" class="text-right">Totaux</td>
         <td class="text-right">{_fmt(total_ht)} DA</td>
         <td class="text-right">{_fmt(total_tva)} DA</td>
         <td class="text-right">{_fmt(total_ttc)} DA</td>
@@ -423,8 +530,6 @@ def build_bon_html(profil, bon_data: dict, lignes: list, remises: list,
 </div>
 </body>
 </html>"""
-
-
 def build_facture_html(profil, facture: dict, lignes: list,
                        tva_details: list) -> str:
     """Génère le HTML complet d'une facture."""

@@ -387,22 +387,33 @@ def print_preview(data, title, headers, footer_text=None):
     scrollbar_y.pack(side="right", fill="y")
     scrollbar_x.pack(side="bottom", fill="x")
     
+    # Construire le contenu texte
     content = f"\n{'='*100}\n"
     content += f"{title:^100}\n"
     content += f"{'='*100}\n"
     content += f"Date d'édition: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n"
     content += f"{'-'*100}\n\n"
     
+    # Construction du tableau avec largeur fixe
+    col_widths = []
     for header in headers:
-        content += f"{header:<20}"
-    content += "\n" + "-"*100 + "\n"
+        col_widths.append(max(len(str(header)), 15))  # Largeur minimale
     
+    # En-têtes
+    header_line = ""
+    for i, header in enumerate(headers):
+        header_line += f"{str(header):<{col_widths[i]}}"
+    content += header_line + "\n"
+    content += "-" * sum(col_widths) + "\n"
+    
+    # Données
     for row in data:
-        for cell in row:
-            content += f"{str(cell):<20}"
-        content += "\n"
+        line = ""
+        for i, cell in enumerate(row):
+            line += f"{str(cell):<{col_widths[i]}}"
+        content += line + "\n"
     
-    content += f"\n{'-'*100}\n"
+    content += f"\n{'-'*sum(col_widths)}\n"
     content += f"Total lignes: {len(data)}\n"
     if footer_text:
         content += f"{footer_text}\n"
@@ -414,35 +425,166 @@ def print_preview(data, title, headers, footer_text=None):
     btn_frame.pack(fill="x", padx=10, pady=10)
     
     def print_to_printer():
+        """Impression avec mise en page HTML pour un meilleur rendu"""
         try:
-            text_content = text_widget.get("1.0", tk.END)
-            print_window = tk.Toplevel(preview)
-            print_window.title("Impression")
-            print_window.geometry("400x200")
-            print_window.configure(bg=CLR_BG)
-            center_window(print_window, 400, 200)
-            tk.Label(print_window, text="Préparation de l'impression...", 
-                    bg=CLR_BG, fg=CLR_TEXT, font=("Segoe UI", 12)).pack(expand=True)
-            print_window.update()
+            # Construction du HTML avec styles d'impression
+            html_content = build_print_html(data, title, headers, footer_text)
             
-            temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
-            temp_file.write(text_content)
+            # Ouvrir dans le navigateur pour impression
+            temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8')
+            temp_file.write(html_content)
             temp_file.close()
             
-            try:
-                if os.name == 'nt':
-                    os.startfile(temp_file.name, "print")
-                    messagebox.showinfo("Impression", "Dialogue d'impression ouvert.\nVérifiez votre imprimante.")
-                else:
-                    subprocess.run(['lp', temp_file.name])
-                    messagebox.showinfo("Impression", "Document envoyé à l'imprimante.")
-            except Exception as e:
-                messagebox.showerror("Erreur", f"Erreur d'impression: {str(e)}")
-            finally:
-                preview.after(5000, lambda: os.unlink(temp_file.name))
-            print_window.destroy()
+            # Ouvrir dans le navigateur
+            webbrowser.open(temp_file.name)
+            
+            messagebox.showinfo(
+                "Impression", 
+                "📄 Le document s'ouvre dans votre navigateur.\n\n"
+                "Pour imprimer :\n"
+                "• Ctrl+P (Windows/Linux)\n"
+                "• Cmd+P (Mac)\n\n"
+                "L'en-tête du tableau sera en blanc avec texte noir gras."
+            )
+            
+            # Supprimer le fichier après un délai
+            preview.after(30000, lambda: os.unlink(temp_file.name))
+            
         except Exception as e:
-            messagebox.showerror("Erreur", f"Erreur lors de l'impression: {str(e)}")
+            messagebox.showerror("Erreur", f"Erreur d'impression: {str(e)}")
+    
+    def build_print_html(data, title, headers, footer_text=None):
+        """Construire le HTML pour l'impression avec styles"""
+        # Largeurs des colonnes
+        col_widths = []
+        for header in headers:
+            col_widths.append(max(len(str(header)), 15))
+        
+        # Construire le tableau HTML
+        table_html = "<table>\n"
+        
+        # En-tête avec fond blanc et texte noir gras
+        table_html += "    <thead>\n"
+        table_html += "        <tr>\n"
+        for i, header in enumerate(headers):
+            table_html += f'            <th style="background-color: #ffffff !important; color: #000000 !important; font-weight: bold !important; border: 1px solid #000000; padding: 8px; text-align: left;">{header}</th>\n'
+        table_html += "        </tr>\n"
+        table_html += "    </thead>\n"
+        
+        # Corps du tableau
+        table_html += "    <tbody>\n"
+        for row in data:
+            table_html += "        <tr>\n"
+            for i, cell in enumerate(row):
+                table_html += f'            <td style="border: 1px solid #cccccc; padding: 6px; text-align: left;">{cell}</td>\n'
+            table_html += "        </tr>\n"
+        table_html += "    </tbody>\n"
+        table_html += "</table>\n"
+        
+        # Construction complète du HTML
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>{title}</title>
+            <style>
+                /* Styles pour l'écran */
+                body {{
+                    font-family: 'Courier New', monospace;
+                    margin: 20px;
+                    background-color: #ffffff;
+                    color: #000000;
+                }}
+                h1 {{
+                    color: #333333;
+                    text-align: center;
+                    font-size: 18px;
+                }}
+                .header-info {{
+                    text-align: center;
+                    margin-bottom: 20px;
+                    font-size: 12px;
+                }}
+                table {{
+                    border-collapse: collapse;
+                    width: 100%;
+                    font-size: 11px;
+                }}
+                
+                /* ✅ STYLES D'IMPRESSION */
+                @media print {{
+                    body {{
+                        margin: 15px;
+                        font-size: 10px;
+                    }}
+                    h1 {{
+                        font-size: 16px;
+                        color: #000000 !important;
+                    }}
+                    
+                    /* En-têtes de tableau : fond blanc, texte noir gras */
+                    th {{
+                        background-color: #ffffff !important;
+                        color: #000000 !important;
+                        font-weight: bold !important;
+                        border: 1px solid #000000 !important;
+                        padding: 6px !important;
+                    }}
+                    
+                    /* Corps du tableau */
+                    td {{
+                        border: 1px solid #999999 !important;
+                        padding: 4px !important;
+                        color: #000000 !important;
+                    }}
+                    
+                    /* Éviter les coupures de page */
+                    table {{
+                        page-break-inside: auto;
+                    }}
+                    tr {{
+                        page-break-inside: avoid;
+                        page-break-after: auto;
+                    }}
+                    thead {{
+                        display: table-header-group;
+                    }}
+                    
+                    /* Désactiver tous les fonds colorés */
+                    * {{
+                        background-color: #ffffff !important;
+                        color: #000000 !important;
+                    }}
+                    
+                    /* Footer */
+                    .footer {{
+                        margin-top: 20px;
+                        font-size: 9px;
+                        text-align: center;
+                        color: #000000 !important;
+                    }}
+                }}
+            </style>
+        </head>
+        <body>
+            <h1>{title}</h1>
+            <div class="header-info">
+                Généré le: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}
+            </div>
+            <hr>
+            
+            {table_html}
+            
+            <div class="footer">
+                <hr>
+                Total lignes: {len(data)}
+                {f'<br>{footer_text}' if footer_text else ''}
+            </div>
+        </body>
+        </html>
+        """
+        return html_content
     
     def export_to_html_file():
         filename = filedialog.asksaveasfilename(
@@ -451,27 +593,7 @@ def print_preview(data, title, headers, footer_text=None):
             initialfile=f"{title.replace(' ', '_')}.html"
         )
         if filename:
-            text_content = text_widget.get("1.0", tk.END)
-            html_content = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <title>{title}</title>
-                <style>
-                    body {{ font-family: 'Courier New', monospace; margin: 20px; }}
-                    pre {{ white-space: pre-wrap; font-family: 'Courier New', monospace; }}
-                    h1 {{ color: #333; }}
-                </style>
-            </head>
-            <body>
-                <h1>{title}</h1>
-                <p>Généré le: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}</p>
-                <hr>
-                <pre>{text_content}</pre>
-            </body>
-            </html>
-            """
+            html_content = build_print_html(data, title, headers, footer_text)
             with open(filename, 'w', encoding='utf-8') as f:
                 f.write(html_content)
             messagebox.showinfo("Succès", f"Fichier HTML créé: {filename}")
@@ -3309,15 +3431,119 @@ class FactureDetailDialog(tk.Toplevel):
     def _get_html(self) -> str:
         from gestion_stock import get_profil_by_type
         profil = get_profil_by_type("facture")
-        # Enrichir bon_data avec les champs attendus
         fac = dict(self.facture)
         fac["bon_numero"] = self.facture.get("bon_numero", "")
-        return hr.build_facture_html(
+        
+        html = hr.build_facture_html(
             profil      = profil,
             facture     = fac,
             lignes      = [dict(l) for l in self.lignes],
             tva_details = [dict(t) for t in self.tva_details],
         )
+        
+        # ✅ AJOUT DES STYLES D'IMPRESSION
+        print_styles = """
+        <style>
+            @media print {
+                * {
+                    background-color: #ffffff !important;
+                    color: #000000 !important;
+                    box-shadow: none !important;
+                    text-shadow: none !important;
+                    background-image: none !important;
+                    filter: none !important;
+                    -webkit-filter: none !important;
+                    opacity: 1 !important;
+                }
+                
+                body {
+                    background-color: #ffffff !important;
+                    margin: 15px !important;
+                    font-size: 11pt !important;
+                    color: #000000 !important;
+                    font-family: 'Arial', 'Helvetica', sans-serif !important;
+                }
+                
+                th {
+                    background-color: #ffffff !important;
+                    color: #000000 !important;
+                    font-weight: 700 !important;
+                    font-size: 11pt !important;
+                    font-family: 'Arial', 'Helvetica', sans-serif !important;
+                    border: 2px solid #000000 !important;
+                    border-bottom: 3px solid #000000 !important;
+                    text-align: center !important;
+                    padding: 8px 12px !important;
+                    vertical-align: middle !important;
+                    page-break-inside: avoid !important;
+                }
+                
+                td {
+                    background-color: #ffffff !important;
+                    color: #000000 !important;
+                    border: 1px solid #888888 !important;
+                    padding: 6px 10px !important;
+                    font-size: 10pt !important;
+                    font-family: 'Arial', 'Helvetica', sans-serif !important;
+                    text-align: center !important;
+                }
+                
+                tr:nth-child(even) td {
+                    background-color: #f5f5f5 !important;
+                }
+                
+                .header-section, .header, .bg-primary, .bg-dark {
+                    background-color: #ffffff !important;
+                    color: #000000 !important;
+                    border-bottom: 3px solid #000000 !important;
+                }
+                
+                .header-section h1, .header-section h2, .header-section h3 {
+                    color: #000000 !important;
+                    font-weight: 700 !important;
+                }
+                
+                h1, h2, h3, h4, h5 {
+                    color: #000000 !important;
+                    font-weight: 700 !important;
+                }
+                
+                table {
+                    border-collapse: collapse !important;
+                    width: 100% !important;
+                    page-break-inside: auto !important;
+                }
+                
+                thead {
+                    display: table-header-group !important;
+                }
+                
+                tr {
+                    page-break-inside: avoid !important;
+                    page-break-after: auto !important;
+                }
+                
+                .total-row td, .grand-total td {
+                    font-weight: 700 !important;
+                    border-top: 3px solid #000000 !important;
+                }
+                
+                .footer, .footer p, .footer div {
+                    color: #000000 !important;
+                    border-top: 2px solid #000000 !important;
+                    padding-top: 10px !important;
+                    margin-top: 15px !important;
+                }
+            }
+        </style>
+        """
+        
+        if '</head>' in html:
+            html = html.replace('</head>', print_styles + '</head>')
+        else:
+            html = html.replace('<body>', print_styles + '<body>')
+        
+        return html
  
     def print_facture(self):
         viewer = hr.DocumentViewer(self)
@@ -7715,15 +7941,129 @@ class BonDetailDialog(tk.Toplevel):
         ).fetchall()
         conn.close()
         remises_dicts = [dict(r) for r in remises]
-        lignes_dicts  = [dict(l) for l in self.lignes_data]
-        return hr.build_bon_html(
+        
+        # ============================================================
+        # ✅ SUPPRIMER COMPLÈTEMENT LA COLONNE "code"
+        # ============================================================
+        lignes_sans_code = []
+        for l in self.lignes_data:
+            l_dict = dict(l)
+            # Supprimer la clé "code" (supprime aussi l'en-tête)
+            l_dict.pop("code", None)  # pop() supprime la clé si elle existe
+            lignes_sans_code.append(l_dict)
+        
+        html = hr.build_bon_html(
             profil        = profil,
             bon_data      = self.bon_data,
-            lignes        = lignes_dicts,
+            lignes        = lignes_sans_code,  # ✅ Lignes sans la clé "code"
             remises       = remises_dicts,
             bon_type      = self.bon_type,
         )
- 
+        
+        # ✅ STYLES D'IMPRESSION (déjà dans votre code)
+        print_styles = """
+        <style>
+            @media print {
+                * {
+                    background-color: #ffffff !important;
+                    color: #000000 !important;
+                    box-shadow: none !important;
+                    text-shadow: none !important;
+                    background-image: none !important;
+                    filter: none !important;
+                    -webkit-filter: none !important;
+                    opacity: 1 !important;
+                }
+                
+                body {
+                    background-color: #ffffff !important;
+                    margin: 15px !important;
+                    font-size: 11pt !important;
+                    color: #000000 !important;
+                    font-family: 'Arial', 'Helvetica', sans-serif !important;
+                }
+                
+                th {
+                    background-color: #ffffff !important;
+                    color: #000000 !important;
+                    font-weight: 700 !important;
+                    font-size: 11pt !important;
+                    font-family: 'Arial', 'Helvetica', sans-serif !important;
+                    border: 2px solid #000000 !important;
+                    border-bottom: 3px solid #000000 !important;
+                    text-align: center !important;
+                    padding: 8px 12px !important;
+                    vertical-align: middle !important;
+                    page-break-inside: avoid !important;
+                }
+                
+                td {
+                    background-color: #ffffff !important;
+                    color: #000000 !important;
+                    border: 1px solid #888888 !important;
+                    padding: 6px 10px !important;
+                    font-size: 10pt !important;
+                    font-family: 'Arial', 'Helvetica', sans-serif !important;
+                    text-align: center !important;
+                }
+                
+                tr:nth-child(even) td {
+                    background-color: #f5f5f5 !important;
+                }
+                
+                .header-section, .header, .bg-primary, .bg-dark {
+                    background-color: #ffffff !important;
+                    color: #000000 !important;
+                    border-bottom: 3px solid #000000 !important;
+                }
+                
+                .header-section h1, .header-section h2, .header-section h3 {
+                    color: #000000 !important;
+                    font-weight: 700 !important;
+                }
+                
+                h1, h2, h3, h4, h5 {
+                    color: #000000 !important;
+                    font-weight: 700 !important;
+                }
+                
+                table {
+                    border-collapse: collapse !important;
+                    width: 100% !important;
+                    page-break-inside: auto !important;
+                }
+                
+                thead {
+                    display: table-header-group !important;
+                }
+                
+                tr {
+                    page-break-inside: avoid !important;
+                    page-break-after: auto !important;
+                }
+                
+                .total-row td, .grand-total td {
+                    font-weight: 700 !important;
+                    border-top: 3px solid #000000 !important;
+                }
+                
+                .footer, .footer p, .footer div {
+                    color: #000000 !important;
+                    border-top: 2px solid #000000 !important;
+                    padding-top: 10px !important;
+                    margin-top: 15px !important;
+                }
+            }
+        </style>
+        """
+        
+        if '</head>' in html:
+            html = html.replace('</head>', print_styles + '</head>')
+        else:
+            html = html.replace('<body>', print_styles + '<body>')
+        
+        return html
+        
     def print_bon(self):
         viewer = hr.DocumentViewer(self)
         viewer.show(self._get_html(), f"BON N°{self.bon_data['numero']}")
@@ -8042,12 +8382,12 @@ class VersementPage(tk.Frame):
                     vers = conn.execute(f"SELECT client_id, montant FROM {self.table} WHERE id=?", (vers_id,)).fetchone()
                     if vers:
                         # Recalculer le solde client
-                        conn.execute(f"UPDATE {self.tiers_table} SET solde = solde - ? WHERE id=?", 
+                        conn.execute(f"UPDATE {self.tiers_table} SET solde = solde + ? WHERE id=?", 
                                    (vers["montant"], vers["client_id"]))
                 else:
                     vers = conn.execute(f"SELECT fournisseur_id, montant FROM {self.table} WHERE id=?", (vers_id,)).fetchone()
                     if vers:
-                        conn.execute(f"UPDATE {self.tiers_table} SET solde = solde - ? WHERE id=?", 
+                        conn.execute(f"UPDATE {self.tiers_table} SET solde = solde + ? WHERE id=?", 
                                    (vers["montant"], vers["fournisseur_id"]))
                 
                 conn.execute(f"DELETE FROM {self.table} WHERE id=?", (vers_id,))
@@ -9889,6 +10229,109 @@ class SituationPage(tk.Frame):
             date_debut  = self.date_debut_var.get(),
             date_fin    = self.date_fin_var.get(),
         )
+        
+        # ✅ AJOUT DES STYLES D'IMPRESSION
+        print_styles = """
+        <style>
+            @media print {
+                * {
+                    background-color: #ffffff !important;
+                    color: #000000 !important;
+                    box-shadow: none !important;
+                    text-shadow: none !important;
+                    background-image: none !important;
+                    filter: none !important;
+                    -webkit-filter: none !important;
+                    opacity: 1 !important;
+                }
+                
+                body {
+                    background-color: #ffffff !important;
+                    margin: 15px !important;
+                    font-size: 11pt !important;
+                    color: #000000 !important;
+                    font-family: 'Arial', 'Helvetica', sans-serif !important;
+                }
+                
+                th {
+                    background-color: #ffffff !important;
+                    color: #000000 !important;
+                    font-weight: 700 !important;
+                    font-size: 11pt !important;
+                    font-family: 'Arial', 'Helvetica', sans-serif !important;
+                    border: 2px solid #000000 !important;
+                    border-bottom: 3px solid #000000 !important;
+                    text-align: center !important;
+                    padding: 8px 12px !important;
+                    vertical-align: middle !important;
+                    page-break-inside: avoid !important;
+                }
+                
+                td {
+                    background-color: #ffffff !important;
+                    color: #000000 !important;
+                    border: 1px solid #888888 !important;
+                    padding: 6px 10px !important;
+                    font-size: 10pt !important;
+                    font-family: 'Arial', 'Helvetica', sans-serif !important;
+                    text-align: center !important;
+                }
+                
+                tr:nth-child(even) td {
+                    background-color: #f5f5f5 !important;
+                }
+                
+                .header-section, .header, .bg-primary, .bg-dark {
+                    background-color: #ffffff !important;
+                    color: #000000 !important;
+                    border-bottom: 3px solid #000000 !important;
+                }
+                
+                .header-section h1, .header-section h2, .header-section h3 {
+                    color: #000000 !important;
+                    font-weight: 700 !important;
+                }
+                
+                h1, h2, h3, h4, h5 {
+                    color: #000000 !important;
+                    font-weight: 700 !important;
+                }
+                
+                table {
+                    border-collapse: collapse !important;
+                    width: 100% !important;
+                    page-break-inside: auto !important;
+                }
+                
+                thead {
+                    display: table-header-group !important;
+                }
+                
+                tr {
+                    page-break-inside: avoid !important;
+                    page-break-after: auto !important;
+                }
+                
+                .total-row td, .grand-total td {
+                    font-weight: 700 !important;
+                    border-top: 3px solid #000000 !important;
+                }
+                
+                .footer, .footer p, .footer div {
+                    color: #000000 !important;
+                    border-top: 2px solid #000000 !important;
+                    padding-top: 10px !important;
+                    margin-top: 15px !important;
+                }
+            }
+        </style>
+        """
+        
+        if '</head>' in html:
+            html = html.replace('</head>', print_styles + '</head>')
+        else:
+            html = html.replace('<body>', print_styles + '<body>')
+        
         viewer = hr.DocumentViewer(self)
         viewer.show(html, f"Situation {self.current_tiers_nom}")
  
