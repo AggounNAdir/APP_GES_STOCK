@@ -4187,13 +4187,433 @@ class TiersPage(tk.Frame):
             ("✏ Modifier", self.edit_item, CLR_ACCENT),
             ("💰 Prix spéciaux", self.gestion_prix_speciaux, CLR_ORANGE),
             ("🗑 Supprimer", self.del_item, CLR_RED),
-            ("💰 Solde Initial", self.gestion_solde_initial, CLR_ORANGE),  # ✅ AJOUTÉ ICI
+            ("💸 Dette", self.gestion_dette, CLR_ORANGE),  
             ("🗑 Supprimer Solde Initial", self.supprimer_solde_initial, CLR_RED),  # ✅ NOUVEAU
 
 
         ]:
             tk.Button(bf, text=txt, command=cmd, bg=clr, fg="white", relief="flat",
                     font=("Segoe UI",9,"bold"), padx=12, pady=6, cursor="hand2").pack(side="left", padx=4)  
+    def gestion_dette(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("", "Sélectionnez un élément")
+            return
+
+        conn = get_conn()
+        tiers = conn.execute(
+            f"SELECT id, nom, solde FROM {self.table} WHERE id=?", (sel[0],)
+        ).fetchone()
+        conn.close()
+
+        if not tiers:
+            return
+
+        if self.tiers_type == "client" and tiers["nom"].upper() == "COMPTOIR":
+            messagebox.showwarning("Action impossible",
+                "Le client 'COMPTOIR' est un compte technique.")
+            return
+
+        dlg = tk.Toplevel(self)
+        dlg.title(f"Gestion des dettes — {tiers['nom']}")
+        dlg.configure(bg=CLR_BG)
+        dlg.geometry("600x750")  # PLUS GRAND
+        dlg.minsize(550, 650)    # TAILLE MINIMUM
+        dlg.resizable(True, True)
+        dlg.grab_set()
+        center_window(dlg, 600, 750)
+
+        main = tk.Frame(dlg, bg=CLR_BG, padx=25, pady=20)
+        main.pack(fill="both", expand=True)
+
+        # En-tête
+        lbl(main, "💸 GESTION DES DETTES", 14, True, CLR_ACCENT).pack(anchor="w")
+        lbl(main, tiers["nom"], 11, True, CLR_TEXT).pack(anchor="w", pady=(2, 0))
+        solde_color = CLR_RED if tiers["solde"] < 0 else CLR_ORANGE
+        lbl(main, f"Solde actuel : {tiers['solde']:,.2f} DA",
+            10, False, solde_color).pack(anchor="w", pady=(0, 15))
+
+        tk.Frame(main, bg=CLR_BORDER, height=1).pack(fill="x", pady=(0, 15))
+
+        # Choix du type
+        lbl(main, "Type d'opération :", 9, True, CLR_MUTED).pack(anchor="w", pady=(0, 8))
+
+        type_var = tk.StringVar(value="solde_initial")
+
+        choix_frame = tk.Frame(main, bg=CLR_BG)
+        choix_frame.pack(fill="x", pady=(0, 15))
+        choix_frame.grid_columnconfigure(0, weight=1)
+        choix_frame.grid_columnconfigure(1, weight=1)
+
+        card_si = tk.Frame(choix_frame, bg=CLR_CARD, relief="flat",
+                        padx=15, pady=12,
+                        highlightthickness=2,
+                        highlightbackground=CLR_ACCENT)
+        card_si.grid(row=0, column=0, padx=(0, 6), sticky="nsew")
+
+        card_remb = tk.Frame(choix_frame, bg=CLR_CARD, relief="flat",
+                            padx=15, pady=12,
+                            highlightthickness=1,
+                            highlightbackground=CLR_BORDER)
+        card_remb.grid(row=0, column=1, padx=(6, 0), sticky="nsew")
+
+        if self.tiers_type == "fournisseur":
+            remb_titre  = "🛒 Achat en nature / avoir"
+            remb_desc   = "Marchandise ou service reçu\n(ex: frigos, équipements…)\n→ Augmente le solde fournisseur"
+            remb_couleur = CLR_ORANGE
+            # solde_initial : dette de départ → augmente aussi le solde
+            si_desc = "Dette antérieure au démarrage\n→ Augmente le solde fournisseur"
+        else:
+            remb_titre  = "↩️ Remboursement client"
+            remb_desc   = "Somme à rembourser au client\n→ Diminue son solde"
+            remb_couleur = CLR_GREEN
+            si_desc = "Dette antérieure au démarrage\n→ Augmente le solde client"
+
+        lbl(card_si, "📋 Solde initial", 10, True, CLR_ACCENT).pack(anchor="w")
+        lbl(card_si, si_desc, 8, False, CLR_MUTED).pack(anchor="w", pady=(3, 0))
+
+        lbl(card_remb, remb_titre, 10, True, CLR_TEXT).pack(anchor="w")
+        lbl(card_remb, remb_desc, 8, False, CLR_MUTED).pack(anchor="w", pady=(3, 0))
+
+        def select_si(e=None):
+            type_var.set("solde_initial")
+            card_si.config(highlightthickness=2, highlightbackground=CLR_ACCENT)
+            card_remb.config(highlightthickness=1, highlightbackground=CLR_BORDER)
+            update_preview()
+
+        def select_remb(e=None):
+            type_var.set("remboursement")
+            card_remb.config(highlightthickness=2, highlightbackground=remb_couleur)
+            card_si.config(highlightthickness=1, highlightbackground=CLR_BORDER)
+            update_preview()
+
+        for w in [card_si] + list(card_si.winfo_children()):
+            w.bind("<Button-1>", select_si)
+        for w in [card_remb] + list(card_remb.winfo_children()):
+            w.bind("<Button-1>", select_remb)
+
+        # Montant
+        lbl(main, "Montant (DA) :", 9, False, CLR_MUTED).pack(anchor="w", pady=(5, 3))
+        montant_var = tk.StringVar()
+        entry(main, width=30, textvariable=montant_var,
+            font=("Segoe UI", 12, "bold")).pack(anchor="w")
+
+        # Motif
+        lbl(main, "Motif :", 9, False, CLR_MUTED).pack(anchor="w", pady=(10, 3))
+        motif_var = tk.StringVar()
+        entry(main, width=50, textvariable=motif_var).pack(anchor="w", fill="x")
+
+        # Date
+        lbl(main, "Date :", 9, False, CLR_MUTED).pack(anchor="w", pady=(10, 3))
+        date_var = tk.StringVar(value="2025-12-31")
+        entry(main, width=18, textvariable=date_var).pack(anchor="w")
+
+        # Aperçu solde
+        tk.Frame(main, bg=CLR_BORDER, height=1).pack(fill="x", pady=15)
+
+        preview = tk.Frame(main, bg=CLR_CARD, padx=15, pady=12)
+        preview.pack(fill="x")
+
+        r1 = tk.Frame(preview, bg=CLR_CARD)
+        r1.pack(fill="x", pady=2)
+        lbl(r1, "Solde avant :", 9, False, CLR_MUTED).pack(side="left")
+        lbl(r1, f"{tiers['solde']:,.2f} DA", 9, False, CLR_TEXT).pack(side="right")
+
+        r2 = tk.Frame(preview, bg=CLR_CARD)
+        r2.pack(fill="x", pady=2)
+        lbl(r2, "Opération :", 9, False, CLR_MUTED).pack(side="left")
+        op_var = tk.StringVar(value="+ 0,00 DA")
+        tk.Label(r2, textvariable=op_var, bg=CLR_CARD,
+                fg=CLR_ACCENT, font=("Segoe UI", 9, "bold")).pack(side="right")
+
+        tk.Frame(preview, bg=CLR_BORDER, height=1).pack(fill="x", pady=6)
+
+        r3 = tk.Frame(preview, bg=CLR_CARD)
+        r3.pack(fill="x", pady=2)
+        lbl(r3, "Nouveau solde :", 10, True, CLR_MUTED).pack(side="left")
+        nv_var = tk.StringVar(value=f"{tiers['solde']:,.2f} DA")
+        tk.Label(r3, textvariable=nv_var, bg=CLR_CARD,
+                fg=CLR_GREEN, font=("Segoe UI", 11, "bold")).pack(side="right")
+
+        def update_preview(*args):
+            try:
+                montant = parse_decimal(montant_var.get() or "0")
+            except ValueError:
+                montant = 0
+            solde = tiers["solde"]
+            type_op = type_var.get()
+
+            if type_op == "solde_initial":
+                # Solde initial → toujours augmente (client ou fournisseur)
+                nouveau = solde + montant
+                op_var.set(f"+ {montant:,.2f} DA")
+            else:
+                if self.tiers_type == "fournisseur":
+                    # Achat en nature → augmente le solde fournisseur
+                    nouveau = solde + montant
+                    op_var.set(f"+ {montant:,.2f} DA")
+                else:
+                    # Remboursement client → diminue son solde
+                    nouveau = solde - montant
+                    op_var.set(f"- {montant:,.2f} DA")
+
+            nv_var.set(f"{nouveau:,.2f} DA")
+
+        montant_var.trace_add("write", update_preview)
+
+        # Boutons
+        tk.Frame(main, bg=CLR_BORDER, height=1).pack(fill="x", pady=15)
+        btn_frame = tk.Frame(main, bg=CLR_BG)
+        btn_frame.pack(fill="x")
+
+        def enregistrer():
+            try:
+                montant = parse_decimal(montant_var.get() or "0")
+                if montant <= 0:
+                    messagebox.showerror("Erreur", "Montant invalide", parent=dlg)
+                    return
+            except ValueError:
+                messagebox.showerror("Erreur", "Montant invalide", parent=dlg)
+                return
+
+            motif = motif_var.get().strip()
+            if not motif:
+                messagebox.showerror("Erreur", "Le motif est obligatoire", parent=dlg)
+                return
+
+            date_val = date_var.get().strip()
+            if not valider_date(date_val):
+                messagebox.showerror("Erreur",
+                    "Date invalide (format YYYY-MM-DD)", parent=dlg)
+                return
+
+            type_op = type_var.get()
+
+            if type_op == "solde_initial":
+                # ── Vérifier doublon solde initial ──────────────────────────
+                conn2 = get_conn()
+                if self.tiers_type == "client":
+                    existing = conn2.execute(
+                        "SELECT id, numero, total FROM bons_vente "
+                        "WHERE client_id=? AND numero LIKE 'SI-C-%' AND statut='Validé'",
+                        (tiers["id"],)
+                    ).fetchone()
+                else:
+                    existing = conn2.execute(
+                        "SELECT id, numero, total FROM bons_achat "
+                        "WHERE fournisseur_id=? AND numero LIKE 'SI-F-%' AND statut='Validé'",
+                        (tiers["id"],)
+                    ).fetchone()
+                conn2.close()
+
+                if existing:
+                    messagebox.showwarning(
+                        "Solde initial déjà existant",
+                        f"Un solde initial existe déjà :\n"
+                        f"📄 {existing['numero']} : {existing['total']:,.2f} DA\n\n"
+                        "Supprimez-le d'abord via 'Supprimer Solde Initial'.",
+                        parent=dlg
+                    )
+                    return
+
+                ok = self.ajouter_solde_initial(
+                    tiers["id"], montant, motif, date_val
+                )
+                if ok:
+                    messagebox.showinfo("Succès",
+                        f"✅ Solde initial enregistré !\n\n"
+                        f"Montant : {montant:,.2f} DA\n"
+                        f"Motif   : {motif}\n"
+                        f"Date    : {date_val}", parent=dlg)
+                    dlg.destroy()
+                    self.refresh()
+
+            else:
+                # ── Achat en nature (fournisseur) ou remboursement (client) ─
+                if self.tiers_type == "fournisseur":
+                    # Enregistrer comme bon d'achat spécial
+                    ok = self._enregistrer_achat_nature(
+                        tiers["id"], montant, motif, date_val
+                    )
+                else:
+                    # Remboursement client → diminue le solde
+                    ok = self._enregistrer_remboursement_client(
+                        tiers["id"], montant, motif, date_val
+                    )
+                if ok:
+                    type_label = ("Achat en nature" if self.tiers_type == "fournisseur"
+                                else "Remboursement client")
+                    messagebox.showinfo("Succès",
+                        f"✅ {type_label} enregistré !\n\n"
+                        f"Montant : {montant:,.2f} DA\n"
+                        f"Motif   : {motif}\n"
+                        f"Date    : {date_val}", parent=dlg)
+                    dlg.destroy()
+                    self.refresh()
+
+        tk.Button(btn_frame, text="✅ Enregistrer", command=enregistrer,
+                bg=CLR_GREEN, fg="white", relief="flat",
+                font=("Segoe UI", 10, "bold"),
+                padx=20, pady=8, cursor="hand2").pack(side="left", padx=(0, 10), expand=True, fill="x")
+
+        tk.Button(btn_frame, text="❌ Annuler", command=dlg.destroy,
+                bg=CLR_RED, fg="white", relief="flat",
+                font=("Segoe UI", 10, "bold"),
+                padx=20, pady=8, cursor="hand2").pack(side="left", expand=True, fill="x")
+
+    def _generer_numero_avoir(self, conn, type_avoir):
+        """
+        Génère un numéro séquentiel pour les AVOIR par type
+        type_avoir: "client" ou "fournisseur"
+        Retourne: "AVOIR-C-001" ou "AVOIR-F-001"
+        """
+        if type_avoir == "client":
+            table = "bons_vente"
+            prefix = "AVOIR-C"
+        else:
+            table = "bons_achat"
+            prefix = "AVOIR-F"
+        
+        # Compter le nombre d'AVOIR existants pour ce type
+        count = conn.execute(f"""
+            SELECT COUNT(*) FROM {table} 
+            WHERE numero LIKE '{prefix}-%'
+        """).fetchone()[0]
+        
+        # Générer le prochain numéro
+        next_num = count + 1
+        return f"{prefix}-{next_num:03d}"  # Format AVOIR-C-001 ou AVOIR-F-001
+    def _enregistrer_achat_nature(self, fournisseur_id, montant, motif, date_bon):
+        """
+        Enregistre un achat en nature (ex: frigos fournis par le fournisseur).
+        Augmente le solde fournisseur.
+        Préfixe : AVOIR-YYYY-TIMESTAMP
+        """
+        conn = get_conn()
+        try:
+            produit = conn.execute(
+                "SELECT id FROM produits WHERE code = 'SOLDE_INITIAL'"
+            ).fetchone()
+            if not produit:
+                conn.execute("""
+                    INSERT INTO produits(code, designation, unite,
+                        prix_achat, prix_vente, stock_actuel, stock_min, actif, tva)
+                    VALUES(?,?,?,?,?,?,?,?,?)
+                """, ("SOLDE_INITIAL", "Opération comptable", "Pcs",
+                    0, 0, 0, 0, 0, 0))
+                produit_id = conn.execute(
+                    "SELECT id FROM produits WHERE code='SOLDE_INITIAL'"
+                ).fetchone()["id"]
+            else:
+                produit_id = produit["id"]
+
+            today = datetime.now()
+            current_year = today.strftime("%Y")
+            timestamp = today.strftime("%Y%m%d%H%M%S%f")
+            num = self._generer_numero_avoir(conn, "fournisseur")
+
+            fournisseur = conn.execute(
+                "SELECT solde FROM fournisseurs WHERE id=?", (fournisseur_id,)
+            ).fetchone()
+            ancien_solde = fournisseur["solde"] if fournisseur else 0
+            nouveau_solde = ancien_solde + montant
+
+            conn.execute("""
+                INSERT INTO bons_achat(
+                    numero, date_bon, fournisseur_id, total, statut,
+                    date_creation, observations, ancien_solde, nouveau_solde)
+                VALUES(?,?,?,?,?,?,?,?,?)
+            """, (num, date_bon, fournisseur_id, montant, "Validé",
+                today.strftime("%Y-%m-%d %H:%M:%S"),
+                motif, ancien_solde, nouveau_solde))
+
+            bon_id = conn.execute(
+                "SELECT id FROM bons_achat WHERE numero=?", (num,)
+            ).fetchone()["id"]
+
+            conn.execute("""
+                INSERT INTO lignes_achat(
+                    bon_id, produit_id, quantite, prix_unitaire,
+                    total, total_ht, tva_taux, total_ttc)
+                VALUES(?,?,?,?,?,?,?,?)
+            """, (bon_id, produit_id, 1, montant, montant,
+                montant, 0, montant))
+
+            conn.execute(
+                "UPDATE fournisseurs SET solde = solde + ? WHERE id=?",
+                (montant, fournisseur_id)
+            )
+
+            conn.commit()
+            return True
+
+        except Exception as e:
+            conn.rollback()
+            messagebox.showerror("Erreur", f"Erreur : {str(e)}")
+            return False
+        finally:
+            conn.close()
+
+
+    def _enregistrer_remboursement_client(self, client_id, montant, motif, date_bon):
+        """
+        Enregistre un remboursement au client.
+        Diminue le solde client.
+        Préfixe : REMB-C-YYYY-TIMESTAMP
+        """
+        conn = get_conn()
+        try:
+            produit = conn.execute(
+                "SELECT id FROM produits WHERE code = 'SOLDE_INITIAL'"
+            ).fetchone()
+            if not produit:
+                conn.execute("""
+                    INSERT INTO produits(code, designation, unite,
+                        prix_achat, prix_vente, stock_actuel, stock_min, actif, tva)
+                    VALUES(?,?,?,?,?,?,?,?,?)
+                """, ("SOLDE_INITIAL", "Opération comptable", "Pcs",
+                    0, 0, 0, 0, 0, 0))
+                produit_id = conn.execute(
+                    "SELECT id FROM produits WHERE code='SOLDE_INITIAL'"
+                ).fetchone()["id"]
+            else:
+                produit_id = produit["id"]
+
+            today = datetime.now()
+            current_year = today.strftime("%Y")
+            timestamp = today.strftime("%Y%m%d%H%M%S%f")
+            num = self._generer_numero_avoir(conn, "client")
+
+            conn.execute("""
+                INSERT INTO bons_vente(
+                    numero, date_bon, client_id, total, statut, observations)
+                VALUES(?,?,?,?,?,?)
+            """, (num, date_bon, client_id, montant, "Validé", motif))
+
+            bon_id = conn.execute(
+                "SELECT id FROM bons_vente WHERE numero=?", (num,)
+            ).fetchone()["id"]
+
+            conn.execute("""
+                INSERT INTO lignes_vente(
+                    bon_id, produit_id, quantite, prix_unitaire, total)
+                VALUES(?,?,?,?,?)
+            """, (bon_id, produit_id, 1, montant, montant))
+
+            conn.execute(
+                "UPDATE clients SET solde = solde - ? WHERE id=?",
+                (montant, client_id)
+            )
+
+            conn.commit()
+            return True
+
+        except Exception as e:
+            conn.rollback()
+            messagebox.showerror("Erreur", f"Erreur : {str(e)}")
+            return False
+        finally:
+            conn.close()          
     def supprimer_solde_initial(self):
         """Supprimer le solde initial d'un client/fournisseur"""
         sel = self.tree.selection()
@@ -4405,10 +4825,23 @@ class TiersPage(tk.Frame):
             else:
                 produit_id = produit["id"]
             
-            # 2. Générer un numéro unique
+            # 2. Générer un numéro unique avec l'année en cours
             today = datetime.now()
+            current_year = today.strftime("%Y")
             prefix = "SI-C" if self.tiers_type == "client" else "SI-F"
-            num = f"{prefix}-{tiers_id:05d}-{today.strftime('%Y%m%d%H%M%S')}"
+            
+            # ✅ CORRECTION : Table correcte
+            table_bons = "bons_vente" if self.tiers_type == "client" else "bons_achat"
+            
+            # ✅ CORRECTION : Compter les soldes initiaux existants
+            # Construire le pattern complet
+            pattern = f"{prefix}-{current_year}-%"
+            
+            # ✅ CORRECTION : Utiliser une requête simple SANS f-string pour le LIKE
+            query = f"SELECT COUNT(*) FROM {table_bons} WHERE numero LIKE ? AND statut='Validé'"
+            count = conn.execute(query, (pattern,)).fetchone()[0]
+            
+            num = f"{prefix}-{current_year}-{count + 1:03d}"
             
             # ✅ Utiliser la date passée ou la date par défaut
             if date_bon is None:
@@ -4502,13 +4935,79 @@ class TiersPage(tk.Frame):
         self.tree.delete(*self.tree.get_children())
         conn = get_conn()
         rows = conn.execute(f"SELECT * FROM {self.table} ORDER BY nom").fetchall()
-        conn.close()
         
         # ✅ METTRE À JOUR LA LISTE DES TIERS
         self.tiers_list = []
+        
         for r in rows:
             if q in r["code"].lower() or q in r["nom"].lower():
-                clr = CLR_RED if r["solde"] < 0 else CLR_TEXT
+                tiers_id = r["id"]
+                
+                # ✅ Calculer le solde réel
+                if self.tiers_type == "client":
+                    # Récupérer les soldes initiaux
+                    si = conn.execute("""
+                        SELECT COALESCE(SUM(total),0) FROM bons_vente 
+                        WHERE client_id=? AND numero LIKE 'SI-C-%' AND statut='Validé'
+                    """, (tiers_id,)).fetchone()[0]
+                    
+                    # Récupérer les ventes
+                    ventes = conn.execute("""
+                        SELECT COALESCE(SUM(total),0) FROM bons_vente 
+                        WHERE client_id=? AND statut='Validé' AND numero NOT LIKE 'SI-C-%'
+                    """, (tiers_id,)).fetchone()[0]
+                    
+                    # Récupérer les retours
+                    retours = conn.execute("""
+                        SELECT COALESCE(SUM(total),0) FROM retours_vente 
+                        WHERE client_id=?
+                    """, (tiers_id,)).fetchone()[0]
+                    
+                    # Récupérer les versements
+                    versements = conn.execute("""
+                        SELECT COALESCE(SUM(montant),0) FROM versements_clients 
+                        WHERE client_id=?
+                    """, (tiers_id,)).fetchone()[0]
+                    
+                    # Calculer le solde réel
+                    solde_reel = si + ventes - retours - versements
+                    
+                else:  # fournisseur
+                    # Récupérer les soldes initiaux
+                    si = conn.execute("""
+                        SELECT COALESCE(SUM(total),0) FROM bons_achat 
+                        WHERE fournisseur_id=? AND numero LIKE 'SI-F-%' AND statut='Validé'
+                    """, (tiers_id,)).fetchone()[0]
+                    
+                    # Récupérer les achats
+                    achats = conn.execute("""
+                        SELECT COALESCE(SUM(total),0) FROM bons_achat 
+                        WHERE fournisseur_id=? AND statut='Validé' AND numero NOT LIKE 'SI-F-%'
+                    """, (tiers_id,)).fetchone()[0]
+                    
+                    # Récupérer les retours
+                    retours = conn.execute("""
+                        SELECT COALESCE(SUM(total),0) FROM retours_achat 
+                        WHERE fournisseur_id=?
+                    """, (tiers_id,)).fetchone()[0]
+                    
+                    # Récupérer les versements
+                    versements = conn.execute("""
+                        SELECT COALESCE(SUM(montant),0) FROM versements_fournisseurs 
+                        WHERE fournisseur_id=?
+                    """, (tiers_id,)).fetchone()[0]
+                    
+                    # Calculer le solde réel
+                    solde_reel = si + achats - retours - versements
+                
+                # ✅ Afficher le solde réel
+                clr = CLR_RED if solde_reel < 0 else CLR_TEXT
+                
+                # ✅ Ajouter une indication si le solde enregistré est différent
+                solde_enregistre = r["solde"]
+               
+                solde_affichage = f"{solde_reel:.2f}"
+                
                 self.tree.insert("", "end", iid=r["id"],
                     values=(
                         r["code"], 
@@ -4518,11 +5017,14 @@ class TiersPage(tk.Frame):
                         r["tel"] or "",
                         r["email"] or "",
                         r["nif"] or "",
-                        f"{r['solde']:.2f}"
+                        solde_affichage  # ✅ Solde réel calculé
                     ),
-                    tags=("neg",) if r["solde"] < 0 else ())
+                    tags=("neg",) if solde_reel < 0 else ())
+                
                 self.tiers_list.append(r["nom"])  # ✅ AJOUTER À LA LISTE
+        
         self.tree.tag_configure("neg", foreground=CLR_RED)
+        conn.close()
         
         # ✅ METTRE À JOUR LES COMBOBOX DANS LES AUTRES PAGES
         self.update_comboboxes()
@@ -10056,7 +10558,92 @@ class SituationPage(tk.Frame):
             self.current_tiers_id = self.tiers_data[key]["id"]
             self.current_tiers_nom = self.tiers_data[key]["nom"]
             self.refresh_situation()
-    
+    def modifier_observation_avoir(self):
+        """Modifier l'observation d'un avoir (AVOIR-C ou AVOIR-F)"""
+        # Récupérer la sélection dans l'historique
+        sel = self.histo_tree.selection()
+        if not sel:
+            messagebox.showwarning("Avertissement", "Sélectionnez une ligne dans l'historique")
+            return
+        
+        # Récupérer les valeurs de la ligne sélectionnée
+        values = self.histo_tree.item(sel[0])["values"]
+        if len(values) < 3:
+            messagebox.showwarning("Avertissement", "Ligne invalide")
+            return
+        
+        type_transaction = values[1]  # Type (AVOIR, SOLDE INITIAL, etc.)
+        document = values[2]          # Document (numéro ou observation)
+        
+        # Vérifier que c'est bien un AVOIR ou SOLDE INITIAL
+        if type_transaction not in ["AVOIR", "SOLDE INITIAL"]:
+            messagebox.showwarning("Avertissement", 
+                "Cette fonction n'est disponible que pour les AVOIR et SOLDE INITIAL")
+            return
+        
+        # Récupérer le numéro du document (si c'est une observation, il faut retrouver le bon)
+        conn = get_conn()
+        
+        # Chercher le bon correspondant
+        if self.sit_type == "client":
+            # Chercher dans les bons de vente
+            bon = conn.execute("""
+                SELECT id, numero, observations 
+                FROM bons_vente 
+                WHERE client_id=? AND (numero LIKE 'AVOIR-C-%' OR numero LIKE 'SI-C-%')
+                AND (numero = ? OR observations = ?)
+                ORDER BY date_bon DESC
+            """, (self.current_tiers_id, document, document)).fetchone()
+        else:
+            # Chercher dans les bons d'achat
+            bon = conn.execute("""
+                SELECT id, numero, observations 
+                FROM bons_achat 
+                WHERE fournisseur_id=? AND (numero LIKE 'AVOIR-F-%' OR numero LIKE 'SI-F-%')
+                AND (numero = ? OR observations = ?)
+                ORDER BY date_bon DESC
+            """, (self.current_tiers_id, document, document)).fetchone()
+        
+        conn.close()
+        
+        if not bon:
+            messagebox.showwarning("Avertissement", "Document non trouvé")
+            return
+        
+        # Demander la nouvelle observation
+        nouvelle_obs = simpledialog.askstring(
+            "Modifier l'observation",
+            f"Document: {bon['numero']}\n"
+            f"Observation actuelle: {bon['observations'] or '(vide)'}\n\n"
+            f"Nouvelle observation:",
+            initialvalue=bon['observations'] or "",
+            parent=self
+        )
+        
+        if nouvelle_obs is None:
+            return  # L'utilisateur a annulé
+        
+        # Mettre à jour dans la base de données
+        conn = get_conn()
+        try:
+            if self.sit_type == "client":
+                conn.execute(
+                    "UPDATE bons_vente SET observations = ? WHERE id = ?",
+                    (nouvelle_obs.strip(), bon["id"])
+                )
+            else:
+                conn.execute(
+                    "UPDATE bons_achat SET observations = ? WHERE id = ?",
+                    (nouvelle_obs.strip(), bon["id"])
+                )
+            conn.commit()
+            messagebox.showinfo("Succès", "✅ Observation mise à jour avec succès")
+            self.refresh_situation()  # Rafraîchir l'affichage
+        except Exception as e:
+            conn.rollback()
+            messagebox.showerror("Erreur", f"Erreur lors de la mise à jour: {str(e)}")
+        finally:
+            conn.close()
     def refresh(self):
         self.load_tiers_list()
         if self.tiers_combo:
@@ -10172,6 +10759,8 @@ class SituationPage(tk.Frame):
         widths = [100, 100, 120, 120, 120]
         tf, self.histo_tree = make_tree(histo_frame, cols, widths)
         tf.pack(fill="both", expand=True)
+        self.histo_tree.bind("<Double-1>", lambda e: self.modifier_observation_avoir())
+
     
     def _build_versements(self):
         vers_frame = tk.Frame(self.versements_frame, bg=CLR_BG)
@@ -10201,31 +10790,61 @@ class SituationPage(tk.Frame):
         if date_debut and date_fin:
             date_condition = f"AND date BETWEEN '{date_debut}' AND '{date_fin}'"
         
-        # 1. Bons (Ventes ou Achats) - ✅ EXCLURE LES SOLDES INITIAUX
+        # 1. Bons (Ventes ou Achats)
         if self.sit_type == "client":
-            # ✅ Clients : exclure les bons qui commencent par 'SI-C-%'
+            # ✅ Clients
             bons = conn.execute(f"""
-                SELECT date_bon as date, 'VENTE' as type, numero as document, total as montant
+                SELECT date_bon as date, 
+                    CASE 
+                        WHEN numero LIKE 'SI-C-%' THEN 'SOLDE INITIAL'
+                        WHEN numero LIKE 'AVOIR-%' THEN 'AVOIR'
+                        ELSE 'VENTE' 
+                    END as type,
+                    CASE 
+                        WHEN numero LIKE 'SI-C-%' OR numero LIKE 'AVOIR-%' 
+                        THEN COALESCE(observations, numero)
+                        ELSE numero 
+                    END as document,
+                    total as montant,
+                    observations as motif,
+                    '' as mode, '' as reference
                 FROM {self.bons_table}
-                WHERE client_id=? AND statut='Validé' AND numero NOT LIKE 'SI-C-%'
+                WHERE client_id=? AND statut='Validé'
                 {date_condition}
                 ORDER BY date_bon
             """, (self.current_tiers_id,)).fetchall()
         else:
-            # ✅ Fournisseurs : exclure les bons qui commencent par 'SI-F-%'
+            # ✅ Fournisseurs
             bons = conn.execute(f"""
-                SELECT date_bon as date, 'ACHAT' as type, numero as document, total as montant
+                SELECT date_bon as date, 
+                    CASE 
+                        WHEN numero LIKE 'SI-F-%' THEN 'SOLDE INITIAL'
+                        WHEN numero LIKE 'AVOIR-%' THEN 'AVOIR'
+                        ELSE 'ACHAT' 
+                    END as type,
+                    CASE 
+                        WHEN numero LIKE 'SI-F-%' OR numero LIKE 'AVOIR-%' 
+                        THEN COALESCE(observations, numero)  -- ✅ Afficher observations ou le numéro par défaut
+                        ELSE numero 
+                    END as document,
+                    total as montant,
+                    observations as motif,
+                    '' as mode, '' as reference
                 FROM {self.bons_table}
-                WHERE fournisseur_id=? AND statut='Validé' AND numero NOT LIKE 'SI-F-%'
+                WHERE fournisseur_id=? AND statut='Validé'
                 {date_condition}
                 ORDER BY date_bon
             """, (self.current_tiers_id,)).fetchall()
-        transactions.extend(bons)
+        
+        # ✅ Convertir les bons en dictionnaires
+        for b in bons:
+            transactions.append(dict(b))
         
         # 2. Retours
         if self.sit_type == "client":
             retours = conn.execute(f"""
-                SELECT date_retour as date, 'RETOUR' as type, numero as document, -total as montant
+                SELECT date_retour as date, 'RETOUR' as type, numero as document, -total as montant,
+                    motif, '' as mode, '' as reference
                 FROM {self.retours_table}
                 WHERE client_id=?
                 {date_condition}
@@ -10233,18 +10852,22 @@ class SituationPage(tk.Frame):
             """, (self.current_tiers_id,)).fetchall()
         else:
             retours = conn.execute(f"""
-                SELECT date_retour as date, 'RETOUR' as type, numero as document, -total as montant
+                SELECT date_retour as date, 'RETOUR' as type, numero as document, -total as montant,
+                    motif, '' as mode, '' as reference
                 FROM {self.retours_table}
                 WHERE fournisseur_id=?
                 {date_condition}
                 ORDER BY date_retour
             """, (self.current_tiers_id,)).fetchall()
-        transactions.extend(retours)
+        
+        for r in retours:
+            transactions.append(dict(r))
         
         # 3. Versements
         if self.sit_type == "client":
             versements = conn.execute(f"""
-                SELECT date_vers as date, 'VERSEMENT' as type, numero as document, -montant as montant
+                SELECT date_vers as date, 'VERSEMENT' as type, numero as document, -montant as montant,
+                    '' as motif, mode, reference
                 FROM {self.versements_table}
                 WHERE client_id=?
                 {date_condition}
@@ -10252,13 +10875,16 @@ class SituationPage(tk.Frame):
             """, (self.current_tiers_id,)).fetchall()
         else:
             versements = conn.execute(f"""
-                SELECT date_vers as date, 'VERSEMENT' as type, numero as document, -montant as montant
+                SELECT date_vers as date, 'VERSEMENT' as type, numero as document, -montant as montant,
+                    '' as motif, mode, reference
                 FROM {self.versements_table}
                 WHERE fournisseur_id=?
                 {date_condition}
                 ORDER BY date_vers
             """, (self.current_tiers_id,)).fetchall()
-        transactions.extend(versements)
+        
+        for v in versements:
+            transactions.append(dict(v))
         
         conn.close()
         
@@ -10275,7 +10901,7 @@ class SituationPage(tk.Frame):
         total_versements = 0
         
         for t in transactions:
-            if t["type"] in ("VENTE", "ACHAT"):
+            if t["type"] in ("VENTE", "ACHAT", "AVOIR", "REMBOURSEMENT"):
                 total_operations += t["montant"]
             elif t["type"] == "RETOUR":
                 total_retours += abs(t["montant"])
@@ -10283,7 +10909,7 @@ class SituationPage(tk.Frame):
                 total_versements += abs(t["montant"])
         
         return transactions, total_operations, total_retours, total_versements
-    
+
     def refresh_situation(self):
         if not self.current_tiers_id:
             return
@@ -10294,79 +10920,58 @@ class SituationPage(tk.Frame):
             (self.current_tiers_id,)
         ).fetchone()
 
-        # ✅ RÉCUPÉRER LES SOLDES INITIAUX
+        # ✅ RÉCUPÉRER LES SOLDES INITIAUX POUR LES KPI (TOTAL GLOBAL UNIQUEMENT)
         if self.sit_type == "client":
-            # Soldes initiaux pour les CLIENTS
-            soldes_initiaux_global = conn.execute("""
+            total_si_global = conn.execute("""
                 SELECT COALESCE(SUM(total),0) FROM bons_vente 
                 WHERE client_id=? AND numero LIKE 'SI-C-%' AND statut='Validé'
             """, (self.current_tiers_id,)).fetchone()[0]
             
-            # Opérations normales
             total_ventes_global = conn.execute(
                 "SELECT COALESCE(SUM(total),0) FROM bons_vente "
                 "WHERE client_id=? AND statut='Validé' AND numero NOT LIKE 'SI-C-%'",
                 (self.current_tiers_id,)
             ).fetchone()[0]
+            
             total_retours_global = conn.execute(
                 "SELECT COALESCE(SUM(total),0) FROM retours_vente "
                 "WHERE client_id=?",
                 (self.current_tiers_id,)
             ).fetchone()[0]
+            
             total_versements_global = conn.execute(
                 "SELECT COALESCE(SUM(montant),0) FROM versements_clients "
                 "WHERE client_id=?",
                 (self.current_tiers_id,)
             ).fetchone()[0]
-            
-            # ✅ Récupérer les soldes initiaux pour l'historique
-            soldes_initiaux_histo = conn.execute("""
-                SELECT date_bon as date, 'SOLDE INITIAL' as type, 
-                    numero as document, total as montant
-                FROM bons_vente 
-                WHERE client_id=? AND numero LIKE 'SI-C-%' AND statut='Validé'
-                ORDER BY date_bon
-            """, (self.current_tiers_id,)).fetchall()
-            
         else:
-            # Soldes initiaux pour les FOURNISSEURS
-            soldes_initiaux_global = conn.execute("""
+            total_si_global = conn.execute("""
                 SELECT COALESCE(SUM(total),0) FROM bons_achat 
                 WHERE fournisseur_id=? AND numero LIKE 'SI-F-%' AND statut='Validé'
             """, (self.current_tiers_id,)).fetchone()[0]
             
-            # Opérations normales
             total_ventes_global = conn.execute(
                 "SELECT COALESCE(SUM(total),0) FROM bons_achat "
                 "WHERE fournisseur_id=? AND statut='Validé' AND numero NOT LIKE 'SI-F-%'",
                 (self.current_tiers_id,)
             ).fetchone()[0]
+            
             total_retours_global = conn.execute(
                 "SELECT COALESCE(SUM(total),0) FROM retours_achat "
                 "WHERE fournisseur_id=?",
                 (self.current_tiers_id,)
             ).fetchone()[0]
+            
             total_versements_global = conn.execute(
                 "SELECT COALESCE(SUM(montant),0) FROM versements_fournisseurs "
                 "WHERE fournisseur_id=?",
                 (self.current_tiers_id,)
             ).fetchone()[0]
-            
-            # ✅ Récupérer les soldes initiaux pour l'historique
-            soldes_initiaux_histo = conn.execute("""
-                SELECT date_bon as date, 'SOLDE INITIAL' as type, 
-                    numero as document, total as montant
-                FROM bons_achat 
-                WHERE fournisseur_id=? AND numero LIKE 'SI-F-%' AND statut='Validé'
-                ORDER BY date_bon
-            """, (self.current_tiers_id,)).fetchall()
-
-        conn.close()
 
         # ✅ Solde calculé GLOBAL (tout l'historique)
         solde_calcule_global = (
             total_ventes_global 
-            + soldes_initiaux_global  # ✅ AJOUT DES SOLDES INITIAUX
+            + total_si_global
             - total_retours_global 
             - total_versements_global
         )
@@ -10391,87 +10996,85 @@ class SituationPage(tk.Frame):
             )
             self.status_frame.config(bg=CLR_GREEN)
 
-        # ✅ Les KPI (en haut) restent basés sur la PÉRIODE filtrée
+        # ✅ RÉCUPÉRER LES TRANSACTIONS FILTRÉES (ELLES INCLUENT DÉJÀ LES SOLDES INITIAUX)
         transactions, total_ops, total_ret, total_vers = self.get_filtered_transactions()
         
-        # ✅ RÉCUPÉRER LE TOTAL DES SOLDES INITIAUX DANS LA PÉRIODE
+        # ✅ RÉCUPÉRER LE TOTAL DES SOLDES INITIAUX DANS LA PÉRIODE (pour les KPI uniquement)
         date_debut = self.date_debut_var.get()
         date_fin = self.date_fin_var.get()
         
-        conn = get_conn()
+        conn2 = get_conn()
         if self.sit_type == "client":
-            total_si_periode = conn.execute("""
+            total_si_periode = conn2.execute("""
                 SELECT COALESCE(SUM(total),0) FROM bons_vente 
                 WHERE client_id=? AND numero LIKE 'SI-C-%' AND statut='Validé'
                 AND date_bon BETWEEN ? AND ?
             """, (self.current_tiers_id, date_debut, date_fin)).fetchone()[0]
         else:
-            total_si_periode = conn.execute("""
+            total_si_periode = conn2.execute("""
                 SELECT COALESCE(SUM(total),0) FROM bons_achat 
                 WHERE fournisseur_id=? AND numero LIKE 'SI-F-%' AND statut='Validé'
                 AND date_bon BETWEEN ? AND ?
             """, (self.current_tiers_id, date_debut, date_fin)).fetchone()[0]
-        conn.close()
+        conn2.close()
 
-        # ✅ Calculer le solde final de la période (incluant les soldes initiaux)
-        solde_final_periode = total_ops + total_si_periode - total_ret - total_vers
-
+        # ✅ Mettre à jour les KPI
         if hasattr(self, 'kpi_var_0'):
             self.kpi_var_0.set(f"{total_ops:,.2f} DA")
             self.kpi_var_1.set(f"{total_ret:,.2f} DA")
         if hasattr(self, 'kpi_var_2'):
             self.kpi_var_2.set(f"{total_vers:,.2f} DA")
         if hasattr(self, 'kpi_var_3'):
-            # ✅ Le KPI "Solde" affiche le solde de la période (avec soldes initiaux)
-            self.kpi_var_3.set(f"{solde_final_periode:,.2f} DA")
+            solde_periode = total_si_periode + total_ops - total_ret - total_vers
+            self.kpi_var_3.set(f"{solde_periode:,.2f} DA")
 
-        # ========== HISTORIQUE (filtré par date) ==========
+        # ========== HISTORIQUE (UNIQUEMENT AVEC transactions) ==========
         self.histo_tree.delete(*self.histo_tree.get_children())
-        
-        # ✅ AJOUTER LES SOLDES INITIAUX DANS L'HISTORIQUE
-        all_transactions = list(transactions)
-        
-        # Ajouter les soldes initiaux à l'historique (uniquement si dans la période)
-        for si in soldes_initiaux_histo:
-            si_date = si["date"]
-            if date_debut and date_fin:
-                if date_debut <= si_date <= date_fin:
-                    all_transactions.append(dict(si))
-            else:
-                all_transactions.append(dict(si))
-        
+
+        # ✅ Utiliser directement les transactions (elles contiennent déjà TOUS les soldes initiaux)
+        all_transactions = transactions.copy()
+
         # Trier par date
         all_transactions.sort(key=lambda x: x["date"])
-        
-        # ✅ Afficher l'historique et calculer le solde cumulé
+
+        # ✅ Calculer le solde cumulé
         solde_cumule = 0
-        
+
         # ✅ Ajouter l'en-tête de période
         period_text = f"Période: {date_debut} → {date_fin}"
         if self.type_filter_var.get() != "Tous":
             period_text += f" | Type: {self.type_filter_var.get()}"
-        
+
         self.histo_tree.insert("", "end", values=(
             f"📅 {period_text}", "", "", "", ""
         ), tags=("header",))
-        
-        # ✅ Calculer le solde cumulé pour l'affichage
+
+        # ✅ Afficher les transactions (sans duplication)
         for t in all_transactions:
             solde_cumule += t["montant"]
             
-            # Déterminer la couleur
+            # ✅ Déterminer le type d'affichage
             if t["type"] == "SOLDE INITIAL":
+                type_affichage = "SOLDE INITIAL"
                 tag = "solde_initial"
-            elif t["type"] in ("VENTE", "ACHAT"):
-                tag = "operation"
-            elif t["type"] == "RETOUR":
-                tag = "retour"
-            else:  # VERSEMENT
-                tag = "versement"
+            elif t["type"] == "AVOIR":
+                type_affichage = "AVOIR"
+                tag = "avoir"
+            elif t["type"] == "REMBOURSEMENT":
+                type_affichage = "REMBOURSEMENT"
+                tag = "remboursement"
+            else:
+                type_affichage = t["type"]
+                if t["type"] in ("VENTE", "ACHAT"):
+                    tag = "operation"
+                elif t["type"] == "RETOUR":
+                    tag = "retour"
+                else:  # VERSEMENT
+                    tag = "versement"
             
             self.histo_tree.insert("", "end", values=(
                 t["date"],
-                t["type"],
+                type_affichage,
                 t["document"],
                 f"{t['montant']:+,.2f} DA",
                 f"{solde_cumule:,.2f} DA"
@@ -10488,14 +11091,18 @@ class SituationPage(tk.Frame):
             "versement", foreground=CLR_GREEN)
         self.histo_tree.tag_configure(
             "solde_initial", foreground=CLR_PURPLE, font=("Segoe UI", 9, "bold"))
+        self.histo_tree.tag_configure(
+            "avoir", foreground=CLR_ORANGE, font=("Segoe UI", 9, "bold"))
+        self.histo_tree.tag_configure(
+            "remboursement", foreground=CLR_GREEN, font=("Segoe UI", 9, "bold"))
 
         # ========== VERSEMENTS (filtrés par date) ==========
         self.vers_tree.delete(*self.vers_tree.get_children())
-        conn2 = get_conn()
+        conn3 = get_conn()
 
         if self.sit_type == "client":
             if date_debut and date_fin:
-                vers = conn2.execute(
+                vers = conn3.execute(
                     "SELECT date_vers, numero, montant, mode, reference "
                     "FROM versements_clients "
                     "WHERE client_id=? AND date_vers BETWEEN ? AND ? "
@@ -10503,7 +11110,7 @@ class SituationPage(tk.Frame):
                     (self.current_tiers_id, date_debut, date_fin)
                 ).fetchall()
             else:
-                vers = conn2.execute(
+                vers = conn3.execute(
                     "SELECT date_vers, numero, montant, mode, reference "
                     "FROM versements_clients WHERE client_id=? "
                     "ORDER BY date_vers DESC",
@@ -10511,7 +11118,7 @@ class SituationPage(tk.Frame):
                 ).fetchall()
         else:
             if date_debut and date_fin:
-                vers = conn2.execute(
+                vers = conn3.execute(
                     "SELECT date_vers, numero, montant, mode, reference "
                     "FROM versements_fournisseurs "
                     "WHERE fournisseur_id=? AND date_vers BETWEEN ? AND ? "
@@ -10519,14 +11126,14 @@ class SituationPage(tk.Frame):
                     (self.current_tiers_id, date_debut, date_fin)
                 ).fetchall()
             else:
-                vers = conn2.execute(
+                vers = conn3.execute(
                     "SELECT date_vers, numero, montant, mode, reference "
                     "FROM versements_fournisseurs WHERE fournisseur_id=? "
                     "ORDER BY date_vers DESC",
                     (self.current_tiers_id,)
                 ).fetchall()
 
-        conn2.close()
+        conn3.close()
 
         for v in vers:
             self.vers_tree.insert("", "end", values=(
@@ -10611,132 +11218,37 @@ class SituationPage(tk.Frame):
             if export_to_csv(data, filename, headers):
                 messagebox.showinfo("Succès", f"Exporté vers {filename}")
     
-    def export_filtered_html(self):
-        """Exporter les données filtrées en HTML"""
-        transactions, total_ops, total_ret, total_vers = self.get_filtered_transactions()
-        
-        # ✅ Récupérer les soldes initiaux
-        conn = get_conn()
-        if self.sit_type == "client":
-            soldes_initiaux = conn.execute("""
-                SELECT date_bon as date, 'SOLDE INITIAL' as type, 
-                    numero as document, total as montant
-                FROM bons_vente 
-                WHERE client_id=? AND numero LIKE 'SI-C-%' AND statut='Validé'
-                ORDER BY date_bon
-            """, (self.current_tiers_id,)).fetchall()
-        else:
-            soldes_initiaux = conn.execute("""
-                SELECT date_bon as date, 'SOLDE INITIAL' as type, 
-                    numero as document, total as montant
-                FROM bons_achat 
-                WHERE fournisseur_id=? AND numero LIKE 'SI-F-%' AND statut='Validé'
-                ORDER BY date_bon
-            """, (self.current_tiers_id,)).fetchall()
-        conn.close()
-        
-        if not transactions and not soldes_initiaux:
-            messagebox.showwarning("Avertissement", "Aucune donnée à exporter")
-            return
-        
-        filename = filedialog.asksaveasfilename(
-            defaultextension=".html",
-            filetypes=[("HTML files", "*.html"), ("All files", "*.*")],
-            initialfile=f"situation_{self.tiers_label}_{self.current_tiers_nom}.html"
-        )
-        
-        if filename:
-            headers = ["Date", "Type", "Document", "Montant", "Solde Cumulé"]
-            data = []
-            solde_cumule = 0
-            total_si = 0
-            
-            # ✅ Ajouter les soldes initiaux en premier
-            for si in soldes_initiaux:
-                solde_cumule += si["montant"]
-                total_si += si["montant"]
-                data.append([
-                    si["date"], 
-                    si["type"], 
-                    si["document"],
-                    f"{si['montant']:+,.2f}",
-                    f"{solde_cumule:,.2f}"
-                ])
-            
-            # Ajouter les transactions normales
-            for t in transactions:
-                solde_cumule += t["montant"]
-                data.append([
-                    t["date"], 
-                    t["type"], 
-                    t["document"],
-                    f"{t['montant']:+,.2f}",
-                    f"{solde_cumule:,.2f}"
-                ])
-            
-            # Ajouter les totaux
-            data.append(["", "", "", "", ""])
-            if soldes_initiaux:
-                data.append(["SOLDE INITIAL", "", "", f"{total_si:+,.2f}", ""])
-            data.append(["TOTAL OPERATIONS", "", "", f"{total_ops:+,.2f}", ""])
-            data.append(["TOTAL RETOURS", "", "", f"{total_ret:+,.2f}", ""])
-            data.append(["TOTAL VERSEMENTS", "", "", f"{total_vers:+,.2f}", ""])
-            data.append(["", "", "", "", ""])
-            data.append(["SOLDE FINAL", "", "", f"{solde_cumule:,.2f}", ""])
-            
-            title = f"Situation de {self.current_tiers_nom} - {self.tiers_label}"
-            export_to_html(data, filename, title, headers)
-            if messagebox.askyesno("Ouverture", "Fichier créé. Voulez-vous l'ouvrir ?"):
-                webbrowser.open(filename)
     
     def print_filtered(self):
         from gestion_stock import get_profil_by_type
         transactions, total_ops, total_ret, total_vers = self.get_filtered_transactions()
         
-        # ✅ Récupérer les soldes initiaux
+        # ✅ Récupérer UNIQUEMENT le TOTAL des soldes initiaux pour les KPI
+        date_debut = self.date_debut_var.get()
+        date_fin = self.date_fin_var.get()
+        
         conn = get_conn()
         if self.sit_type == "client":
-            soldes_initiaux = conn.execute("""
-                SELECT date_bon as date, 'SOLDE INITIAL' as type, 
-                    numero as document, total as montant
-                FROM bons_vente 
-                WHERE client_id=? AND numero LIKE 'SI-C-%' AND statut='Validé'
-                ORDER BY date_bon
-            """, (self.current_tiers_id,)).fetchall()
-            
-            # ✅ Récupérer le TOTAL des soldes initiaux
             total_si = conn.execute("""
                 SELECT COALESCE(SUM(total),0) FROM bons_vente 
                 WHERE client_id=? AND numero LIKE 'SI-C-%' AND statut='Validé'
-            """, (self.current_tiers_id,)).fetchone()[0]
+                AND date_bon BETWEEN ? AND ?
+            """, (self.current_tiers_id, date_debut, date_fin)).fetchone()[0]
         else:
-            soldes_initiaux = conn.execute("""
-                SELECT date_bon as date, 'SOLDE INITIAL' as type, 
-                    numero as document, total as montant
-                FROM bons_achat 
-                WHERE fournisseur_id=? AND numero LIKE 'SI-F-%' AND statut='Validé'
-                ORDER BY date_bon
-            """, (self.current_tiers_id,)).fetchall()
-            
-            # ✅ Récupérer le TOTAL des soldes initiaux
             total_si = conn.execute("""
                 SELECT COALESCE(SUM(total),0) FROM bons_achat 
                 WHERE fournisseur_id=? AND numero LIKE 'SI-F-%' AND statut='Validé'
-            """, (self.current_tiers_id,)).fetchone()[0]
+                AND date_bon BETWEEN ? AND ?
+            """, (self.current_tiers_id, date_debut, date_fin)).fetchone()[0]
         conn.close()
         
-        # ✅ Convertir transactions en dictionnaires
+        # ✅ Convertir transactions en dictionnaires (ils contiennent déjà les soldes initiaux)
         transactions_dicts = []
         for t in transactions:
             if hasattr(t, 'keys'):
                 transactions_dicts.append(dict(t))
             else:
                 transactions_dicts.append(t)
-        
-        # ✅ Ajouter les soldes initiaux aux transactions
-        for si in soldes_initiaux:
-            si_dict = dict(si)
-            transactions_dicts.append(si_dict)
         
         # Trier par date
         transactions_dicts.sort(key=lambda x: x["date"])
@@ -10748,7 +11260,6 @@ class SituationPage(tk.Frame):
         
         profil = get_profil_by_type("situation")
         
-        # ✅ Appeler build_situation_html avec le paramètre total_si
         html = hr.build_situation_html(
             profil      = profil,
             tiers_nom   = self.current_tiers_nom,
@@ -10757,14 +11268,10 @@ class SituationPage(tk.Frame):
             total_ops   = total_ops,
             total_ret   = total_ret,
             total_vers  = total_vers,
-            date_debut  = self.date_debut_var.get(),
-            date_fin    = self.date_fin_var.get(),
-            total_si    = total_si,  # ✅ AJOUTER CE PARAMÈTRE
+            date_debut  = date_debut,
+            date_fin    = date_fin,
+            total_si    = total_si,
         )
-        
-        # ✅ AJOUTER LE SOLDE CORRECT DANS LE HTML
-        # On va modifier le HTML après génération pour corriger le total général
-        # Rechercher et remplacer le total général incorrect par le bon
         
         # ✅ AJOUT DES STYLES D'IMPRESSION
         print_styles = """

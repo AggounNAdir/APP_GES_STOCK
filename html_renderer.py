@@ -205,7 +205,49 @@ body {
 }
 """
 
-
+def _get_detail_html(t: dict) -> str:
+    """Génère le HTML de la colonne Détail selon le type d'opération."""
+    type_op = t.get("type", "")
+    detail = ""
+    
+    if type_op == "SOLDE INITIAL":
+        # Pour les soldes initiaux, on affiche le motif
+        motif = t.get("motif", "Solde initial")
+        date_bon = t.get("date", "")
+        detail = f"<span style='font-size:11px;color:#7c3aed;'>{motif}</span>"
+        if date_bon:
+            detail += f"<br><span style='font-size:10px;color:#6b7280;'>📅 {date_bon}</span>"
+    
+    elif type_op in ("VENTE", "ACHAT"):
+        # Pour les bons, on affiche le tiers et le numéro
+        tiers = t.get("tiers", "")
+        numero = t.get("document", "")
+        detail = f"<span style='font-size:11px;'>{tiers}</span>"
+        if numero:
+            detail += f"<br><span style='font-size:10px;color:#6b7280;'>📄 {numero}</span>"
+    
+    elif type_op == "VERSEMENT":
+        # Pour les versements, on affiche le mode et la référence
+        mode = t.get("mode", "Espèces")
+        ref = t.get("reference", "")
+        detail = f"<span style='font-size:11px;'>💳 {mode}</span>"
+        if ref:
+            detail += f"<br><span style='font-size:10px;color:#6b7280;'>Réf: {ref}</span>"
+    
+    elif type_op == "RETOUR":
+        # Pour les retours, on affiche le motif et le bon associé
+        motif = t.get("motif", "")
+        bon_associe = t.get("bon_associe", "")
+        detail = f"<span style='font-size:11px;color:#f97316;'>↩️ {motif or 'Retour'}</span>"
+        if bon_associe:
+            detail += f"<br><span style='font-size:10px;color:#6b7280;'>Bon: {bon_associe}</span>"
+    
+    elif type_op == "REMBOURSEMENT":
+        # Pour les remboursements
+        motif = t.get("motif", "Remboursement")
+        detail = f"<span style='font-size:11px;color:#22c55e;'>💵 {motif}</span>"
+    
+    return detail
 def _badge(statut: str) -> str:
     """Retourne le HTML d'un badge coloré selon le statut."""
     mapping = {
