@@ -671,7 +671,27 @@ def get_active_profil():
     ).fetchone()
     conn.close()
     return dict(profil) if profil else None
+# Ajouter cette fonction après les imports (vers ligne 200)
 
+def get_bon_type(numero):
+    """
+    Détermine le type d'un bon à partir de son numéro
+    Retourne: 'vente', 'achat', 'solde_initial', 'avoir', 'normal'
+    """
+    if numero.startswith('SI-C-'):
+        return 'solde_initial_client'
+    elif numero.startswith('SI-F-'):
+        return 'solde_initial_fournisseur'
+    elif numero.startswith('AVOIR-C-'):
+        return 'avoir_client'
+    elif numero.startswith('AVOIR-F-'):
+        return 'avoir_fournisseur'
+    elif numero.startswith('BV-'):
+        return 'vente'
+    elif numero.startswith('BA-'):
+        return 'achat'
+    else:
+        return 'normal'
 # ========== BASE DE DONNÉES ==========
 def init_db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -1092,7 +1112,30 @@ def recalculer_cout_stock_apres_sortie(conn, produit_id, quantite_sortie):
         "UPDATE produits SET cout_total_stock = ? WHERE id=?",
         (nouveau_cout, produit_id)
     )
-
+def recalculer_pmp_apres_sortie_complete(conn, produit_id):
+    """
+    Après toute sortie de stock (retour achat, annulation…),
+    recalcule le PMP ou le met à 0 si le stock est épuisé.
+    À appeler APRÈS avoir mis à jour stock_actuel et cout_total_stock.
+    """
+    produit = conn.execute(
+        "SELECT stock_actuel, cout_total_stock FROM produits WHERE id=?",
+        (produit_id,)
+    ).fetchone()
+ 
+    if produit["stock_actuel"] > 0:
+        nouveau_pmp = produit["cout_total_stock"] / produit["stock_actuel"]
+    else:
+        nouveau_pmp = 0.0
+        # Remettre à zéro le coût total si stock nul
+        conn.execute(
+            "UPDATE produits SET cout_total_stock = 0 WHERE id=?", (produit_id,)
+        )
+ 
+    conn.execute(
+        "UPDATE produits SET prix_moyen_pondere = ? WHERE id=?",
+        (nouveau_pmp, produit_id)
+    )
 def inverser_stock_achat(conn, lignes):
     """Annule l'effet stock/PMP d'un bon d'achat (suppression ou annulation)."""
     for l in lignes:
@@ -3918,6 +3961,7 @@ class ProduitPage(tk.Frame):
 class ProduitDialog(tk.Toplevel):
     def __init__(self, parent, data=None):
         super().__init__(parent)
+        self.parent = parent
         self.title("Produit")
         self.configure(bg=CLR_BG)
         self.resizable(False, False)
@@ -4061,6 +4105,7 @@ class ProduitDialog(tk.Toplevel):
                     prix_sg, prix_g, prix_d, prix_sp, sa, sm))
             conn.commit()
             messagebox.showinfo("Succès", "Produit enregistré avec succès !")
+            self.notifier_toutes_les_fenetres()
             self.destroy()
         except sqlite3.IntegrityError as e:
             if "code" in str(e):
@@ -4073,6 +4118,34 @@ class ProduitDialog(tk.Toplevel):
             messagebox.showerror("Erreur", f"Erreur: {str(ex)}")
         finally:
             conn.close()
+    def notifier_toutes_les_fenetres(self):
+        """Notifie toutes les fenêtres Toplevel ouvertes qu'un produit a changé"""
+        # Méthode 1 : Utiliser un événement virtuel global
+        # Envoyer un événement à la fenêtre principale
+        root = self.winfo_toplevel()
+        root.event_generate("<<ProduitsModifies>>", when="tail")
+        
+        # Méthode 2 : Parcourir toutes les fenêtres Toplevel
+        for fenetre in root.winfo_children():
+            if isinstance(fenetre, tk.Toplevel):
+                # Essayer de trouver une méthode refresh_produits dans la fenêtre
+                if hasattr(fenetre, 'refresh_produits'):
+                    fenetre.refresh_produits()
+                # Ou chercher dans les enfants de la fenêtre
+                else:
+                    self._chercher_refresh_dans_enfants(fenetre)
+    
+    def _chercher_refresh_dans_enfants(self, widget):
+        """Recherche récursivement un widget avec refresh_produits"""
+        if hasattr(widget, 'refresh_produits'):
+            widget.refresh_produits()
+            return True
+        
+        if hasattr(widget, 'winfo_children'):
+            for enfant in widget.winfo_children():
+                if self._chercher_refresh_dans_enfants(enfant):
+                    return True
+        return False        
 
 # ========== PAGE TABLEAU DE BORD ==========
 
@@ -6028,34 +6101,46 @@ class BonVentePage(tk.Frame):
 
     def cancel_bon(self):
         sel = self.tree.selection()
-        if not sel: 
-            messagebox.showwarning("","Sélectionnez un bon")
+        if not sel:
+            messagebox.showwarning("", "Sélectionnez un bon")
             return
-        
+    
         conn = get_conn()
         facture = conn.execute("SELECT id FROM factures WHERE bon_vente_id=?", (sel[0],)).fetchone()
         if facture:
             messagebox.showwarning("", "Impossible d'annuler un bon qui a une facture associée")
             conn.close()
             return
-        conn.close()
-        
-        if messagebox.askyesno("Annulation","Annuler ce bon de vente ?"):
-            conn = get_conn()
+    
+        if messagebox.askyesno("Annulation", "Annuler ce bon de vente ?"):
             bon = conn.execute("SELECT * FROM bons_vente WHERE id=?", (sel[0],)).fetchone()
             if bon["statut"] == "Annulé":
-                messagebox.showinfo("","Déjà annulé")
+                messagebox.showinfo("", "Déjà annulé")
                 conn.close()
                 return
+    
             lignes = conn.execute("SELECT * FROM lignes_vente WHERE bon_id=?", (sel[0],)).fetchall()
             for l in lignes:
-                conn.execute("UPDATE produits SET stock_actuel=stock_actuel+? WHERE id=?",
-                             (l["quantite"],l["produit_id"]))
-            conn.execute("UPDATE clients SET solde=solde-? WHERE id=?", (bon["total"],bon["client_id"]))
+                conn.execute(
+                    "UPDATE produits SET stock_actuel=stock_actuel+? WHERE id=?",
+                    (l["quantite"], l["produit_id"])
+                )
+    
+            # ✅ CORRECTION : ne pas toucher au solde du client COMPTOIR
+            client = conn.execute(
+                "SELECT nom FROM clients WHERE id=?", (bon["client_id"],)
+            ).fetchone()
+            if client and client["nom"] != "COMPTOIR":
+                conn.execute(
+                    "UPDATE clients SET solde=solde-? WHERE id=?",
+                    (bon["total"], bon["client_id"])
+                )
+    
             conn.execute("UPDATE bons_vente SET statut='Annulé' WHERE id=?", (sel[0],))
             conn.commit()
             conn.close()
             self.refresh()
+ 
 
 
 # ========== DIALOGUE VENTE COMPTOIR ==========
@@ -6083,9 +6168,50 @@ class VenteComptoirDialog(tk.Toplevel):
         self.remise_appliquee = False
         self.remise_motif = ""
         
+        # ✅ Créer les variables AVANT _build()
+        self.prix_var = tk.StringVar()
+        self.prod_var = tk.StringVar()
+        self.qty_var = tk.StringVar(value="1")
+        
         self._build()
         self.after(100, lambda: self.code_barre_entry.focus())
-
+    def charger_produits(self):
+        """✅ Recharge la liste des produits (pour le bouton Rafraîchir)"""
+        conn = get_conn()
+        try:
+            prods = conn.execute("""SELECT id, code, designation, unite, facteur_conversion,
+                                   prix_achat, prix_vente, barcode, stock_actuel,
+                                   prix_detail, prix_gros, prix_super_gros, prix_special
+                            FROM produits WHERE actif = 1 ORDER BY designation""").fetchall()
+        finally:
+            conn.close()
+        
+        self.prod_map = {}
+        self.prod_list = []
+        for r in prods:
+            display = f"{r['code']} - {r['designation']} ({r['prix_vente']:.2f} DA)"
+            self.prod_map[display] = dict(r)
+            self.prod_list.append(display)
+        
+        self.prod_combo['values'] = self.prod_list
+        
+        # Garder la sélection actuelle si elle existe encore
+        current = self.prod_var.get()
+        if current in self.prod_map:
+            # Conserver la sélection
+            pass
+        elif self.prod_list:
+            self.prod_var.set(self.prod_list[0])
+        
+        # Notification visuelle (optionnelle)
+        self._afficher_notification("✅ Liste des produits rafraîchie")
+    
+    def _afficher_notification(self, message):
+        """Affiche une notification temporaire"""
+        notification = tk.Label(self, text=message, bg=CLR_GREEN, fg="white",
+                               font=("Segoe UI", 10, "bold"), padx=20, pady=10)
+        notification.place(relx=0.5, rely=0.02, anchor="n")
+        self.after(3000, notification.destroy)
     def _build(self):
         # Header
         header = tk.Frame(self, bg=CLR_CARD, height=100)
@@ -6145,6 +6271,7 @@ class VenteComptoirDialog(tk.Toplevel):
         
         lbl(left_panel, "Sélection produit:", color=CLR_MUTED, size=9).pack(anchor="w", pady=(15,5))
         
+        # Charger les produits
         conn = get_conn()
         prods = conn.execute("""SELECT id, code, designation, unite, facteur_conversion,
                                prix_achat, prix_vente, barcode, stock_actuel,
@@ -6159,39 +6286,28 @@ class VenteComptoirDialog(tk.Toplevel):
             self.prod_map[display] = dict(r)
             self.prod_list.append(display)
         
-        self.prod_var = tk.StringVar()
         self.prod_combo = combo(left_panel, self.prod_list, width=30, textvariable=self.prod_var)
         self.prod_combo.pack(fill="x", pady=5)
         self.prod_combo.bind("<<ComboboxSelected>>", self.on_produit_selectionne)
+        
+        # ✅ CRÉER LE PRIX SELECTOR APRÈS AVOIR CRÉÉ prix_var
         self.prix_selector = prix_niveaux.PrixSelectorWidget(
-        left_panel,
-        prix_var=self.prix_var,
-        client_id_fn=lambda: self.clients_map.get(self.client_nom.get()) if hasattr(self, 'clients_map') else None
+            left_panel,
+            prix_var=self.prix_var,  # ✅ Maintenant self.prix_var existe
+            client_id_fn=lambda: self.clients_map.get(self.client_nom.get()) 
+                                if hasattr(self, 'clients_map') else None
         )
-        self.prix_selector = prix_niveaux.PrixSelectorWidget(
-        left_panel,
-        prix_var=self.prix_var,
-        client_id_fn=lambda: self.clients_map.get(self.client_nom.get()) if hasattr(self, 'clients_map') else None
-        )
+        self.prix_selector.pack(fill="x", pady=5)
+        
+        # ✅ Frame pour Qté et Prix
         qty_frame = tk.Frame(left_panel, bg=CLR_CARD)
         qty_frame.pack(fill="x", pady=8)
         
         lbl(qty_frame, "Qté:", color=CLR_MUTED, size=9).pack(side="left", padx=2)
-        self.qty_var = tk.StringVar(value="1")
         entry(qty_frame, width=8, textvariable=self.qty_var, font=("Segoe UI", 11)).pack(side="left", padx=5)
         
         lbl(qty_frame, "Prix:", color=CLR_MUTED, size=9).pack(side="left", padx=(15,2))
-        self.prix_var = tk.StringVar()
         entry(qty_frame, width=10, textvariable=self.prix_var, font=("Segoe UI", 11)).pack(side="left", padx=5)
-
-        # ✅ Puis instancier UNE SEULE FOIS
-        self.prix_selector = prix_niveaux.PrixSelectorWidget(
-            left_panel,
-            prix_var=self.prix_var,
-            client_id_fn=lambda: self.clients_map.get(self.client_nom.get())
-                                if hasattr(self, 'clients_map') else None
-        )
-        self.prix_selector.pack(fill="x", pady=5)
         
         tk.Button(left_panel, text="➕ AJOUTER", command=self.ajouter_ligne,
                   bg=CLR_GREEN, fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
@@ -6601,6 +6717,7 @@ class BonDialog(tk.Toplevel):
         self.remise_type = "aucune"
         self.remise_valeur = 0
         self.remise_motif = ""
+        self.bind("<<ProduitsModifies>>", lambda e: self.refresh_produits())
         self._build()
         center_window(self, 1000, 750)
 
@@ -6701,6 +6818,12 @@ class BonDialog(tk.Toplevel):
         self.prod_var = tk.StringVar()
         pcb = combo(prod_frame, list(self.prod_map.keys()), width=35, textvariable=self.prod_var)
         pcb.grid(row=0, column=1, padx=3, columnspan=2)
+        btn_refresh = tk.Button(prod_frame, text="🔄", command=self.refresh_produits,
+                        bg=CLR_ACCENT, fg="white", relief="flat",
+                        font=("Segoe UI", 10, "bold"), padx=6, pady=2,
+                        cursor="hand2", width=3)
+        btn_refresh.grid(row=0, column=3, padx=2, pady=2)
+
         self.prod_var.trace_add("write", self._on_prod_change)
         
         # Infos produit sur la même ligne
@@ -6986,7 +7109,118 @@ class BonDialog(tk.Toplevel):
         self.bind('<Delete>', lambda e: self.remove_ligne())
         if self.prod_map:
             self.prod_var.set(list(self.prod_map.keys())[0])
-      
+    def refresh_produits(self):
+        """✅ Rafraîchit la liste des produits dans le combobox"""
+        print(f"🔄 BonDialog.refresh_produits() appelé !")  # DEBUG
+        
+        conn = get_conn()
+        try:
+            prods = conn.execute("""SELECT id, code, designation, unite, facteur_conversion, 
+                                prix_achat, prix_vente, barcode,
+                                prix_detail, prix_gros, prix_super_gros, prix_special,
+                                tva
+                            FROM produits WHERE actif = 1 ORDER BY designation""").fetchall()
+        finally:
+            conn.close()
+        
+        # Sauvegarder l'ancienne sélection
+        old_selection = self.prod_var.get() if hasattr(self, 'prod_var') else ""
+        
+        # Mettre à jour le dictionnaire des produits
+        self.prod_map = {}
+        new_prod_list = []
+        
+        for r in prods:
+            key = f"{r['code']} - {r['designation']}"
+            self.prod_map[key] = dict(r)
+            new_prod_list.append(key)
+        
+        print(f"📦 Nouveaux produits: {len(new_prod_list)}")  # DEBUG
+        
+        # ✅ MÉTHODE SIMPLIFIÉE : Mettre à jour directement la combobox
+        self._update_combobox_produits(new_prod_list, old_selection)
+        
+        # Mettre à jour les informations du produit sélectionné
+        if old_selection in self.prod_map:
+            p = self.prod_map[old_selection]
+            unite = p["unite"] if p["unite"] else "Pcs"
+            if hasattr(self, 'unite_label'):
+                self.unite_label.config(text=unite)
+            facteur = p["facteur_conversion"] if p["facteur_conversion"] else 1
+            if hasattr(self, 'facteur_label'):
+                self.facteur_label.config(text=f"{facteur:.0f}")
+            
+            if hasattr(self, 'prix_selector'):
+                self.prix_selector.set_produit(p)
+            else:
+                if self.bon_type == "achat":
+                    px = p.get("prix_achat", 0)
+                else:
+                    px = p.get("prix_detail") or p.get("prix_vente", 0)
+                self.prix_var.set(str(px))
+        elif new_prod_list:
+            self.prod_var.set(new_prod_list[0])
+        
+        # ✅ Si un nouveau produit a été ajouté, afficher un message discret
+        if old_selection != self.prod_var.get() and new_prod_list:
+            self._afficher_notification("✅ Nouveau produit disponible !")
+    
+    def _update_combobox_produits(self, new_prod_list, old_selection):
+        """✅ Met à jour la combobox des produits - VERSION SIMPLIFIÉE"""
+        # Méthode 1: Chercher dans la structure de la fenêtre
+        # On parcourt tous les widgets pour trouver le combobox
+        def find_and_update(widget):
+            if isinstance(widget, ttk.Combobox):
+                # Vérifier si c'est la combobox des produits
+                # On vérifie si les valeurs ressemblent à des produits
+                if widget['values'] and len(widget['values']) > 0:
+                    # Vérifier si le premier élément contient " - " (format produit)
+                    if " - " in str(widget['values'][0]):
+                        widget['values'] = new_prod_list
+                        if old_selection in new_prod_list:
+                            self.prod_var.set(old_selection)
+                        elif new_prod_list:
+                            self.prod_var.set(new_prod_list[0])
+                        return True
+            return False
+        
+        # Parcourir récursivement tous les widgets
+        def traverse(widget):
+            if find_and_update(widget):
+                return True
+            if hasattr(widget, 'winfo_children'):
+                for child in widget.winfo_children():
+                    if traverse(child):
+                        return True
+            return False
+        
+        traverse(self)
+        
+        # ✅ MÉTHODE 2: Si la première méthode échoue, forcer la mise à jour
+        # Chercher le combobox dans le frame 'prod_frame'
+        for child in self.winfo_children():
+            if hasattr(child, 'winfo_children'):
+                for subchild in child.winfo_children():
+                    if hasattr(subchild, 'winfo_children'):
+                        for grandchild in subchild.winfo_children():
+                            if isinstance(grandchild, ttk.Combobox):
+                                if grandchild['values'] and len(grandchild['values']) > 0:
+                                    # Si les valeurs contiennent " - ", c'est probablement la bonne
+                                    if " - " in str(grandchild['values'][0]):
+                                        grandchild['values'] = new_prod_list
+                                        if old_selection in new_prod_list:
+                                            self.prod_var.set(old_selection)
+                                        elif new_prod_list:
+                                            self.prod_var.set(new_prod_list[0])
+                                        return
+    
+    def _afficher_notification(self, message):
+        """Affiche une notification temporaire dans la fenêtre"""
+        # Créer un label de notification qui disparaît après 3 secondes
+        notification = tk.Label(self, text=message, bg=CLR_GREEN, fg="white",
+                               font=("Segoe UI", 10, "bold"), padx=20, pady=10)
+        notification.place(relx=0.5, rely=0.02, anchor="n")
+        self.after(3000, notification.destroy)  
     def _get_client_id(self):
         """Retourne l'ID du client sélectionné pour les prix spéciaux"""
         if not hasattr(self, 'tiers_var') or not self.tiers_var.get():
@@ -7006,24 +7240,97 @@ class BonDialog(tk.Toplevel):
         idx = int(sel[0])
         ligne = self.lignes[idx]
         
-        nouvelle_qty = simpledialog.askfloat(
-            "Modifier la quantité",
-            f"Produit: {ligne['designation']}\n"
-            f"Quantité actuelle: {ligne['quantite']:.2f}\n\n"
-            f"Nouvelle quantité:",
-            initialvalue=ligne['quantite'],
-            minvalue=0.01,
-            parent=self
-        )
+        # ✅ Fenêtre de dialogue dédiée
+        dlg = tk.Toplevel(self)
+        dlg.title("Modifier la quantité")
+        dlg.configure(bg=CLR_BG)
+        dlg.geometry("400x300")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+        center_window(dlg, 400, 300)
         
-        if nouvelle_qty and nouvelle_qty > 0:
-            facteur = ligne.get("facteur", 1)
-            nouvelle_qty_base = nouvelle_qty * facteur
+        main_frame = tk.Frame(dlg, bg=CLR_BG, padx=20, pady=20)
+        main_frame.pack(fill="both", expand=True)
+        
+        lbl(main_frame, f"✏️ Modifier la quantité", 12, True, CLR_ACCENT).pack(pady=(0, 10))
+        
+        # Informations du produit
+        info_frame = tk.Frame(main_frame, bg=CLR_CARD, padx=15, pady=10)
+        info_frame.pack(fill="x", pady=5)
+        
+        facteur = ligne.get("facteur", 1)
+        qte_affichee = ligne["quantite"] 
+        # facteur if facteur else ligne["quantite"]
+        
+        lbl(info_frame, f"Produit: {ligne['designation']}", 10, True, CLR_TEXT).pack(anchor="w")
+        lbl(info_frame, f"Quantité actuelle: {qte_affichee:.2f} {ligne.get('unite', 'Pcs')}", 9, False, CLR_MUTED).pack(anchor="w")
+        lbl(info_frame, f"Prix unitaire: {ligne['prix']:.2f} DA", 9, False, CLR_MUTED).pack(anchor="w")
+        
+        # Champ de saisie
+        input_frame = tk.Frame(main_frame, bg=CLR_BG)
+        input_frame.pack(fill="x", pady=10)
+        
+        lbl(input_frame, "Nouvelle quantité:", 9, False, CLR_MUTED).pack(side="left", padx=5)
+        new_qty_var = tk.StringVar(value=str(qte_affichee))
+        entry_qty = entry(input_frame, width=12, textvariable=new_qty_var, font=("Segoe UI", 11, "bold"))
+        entry_qty.pack(side="left", padx=10)
+        entry_qty.focus_set()
+        entry_qty.select_range(0, tk.END)
+        
+        # ✅ Message de statut (au lieu de messagebox)
+        status_var = tk.StringVar(value="")
+        status_label = tk.Label(main_frame, textvariable=status_var, bg=CLR_BG, 
+                            fg=CLR_GREEN, font=("Segoe UI", 9, "bold"))
+        status_label.pack(pady=5)
+        
+        # Boutons
+        btn_frame = tk.Frame(main_frame, bg=CLR_BG)
+        btn_frame.pack(fill="x", pady=10)
+        
+        def valider_modification():
+            try:
+                nouvelle_qty = parse_decimal(new_qty_var.get())
+                if nouvelle_qty <= 0:
+                    status_var.set("❌ La quantité doit être > 0")
+                    status_label.config(fg=CLR_RED)
+                    return
+            except ValueError:
+                status_var.set("❌ Quantité invalide")
+                status_label.config(fg=CLR_RED)
+                return
+            
+            # Mettre à jour la ligne
+            facteur_ligne = ligne.get("facteur", 1)
+            nouvelle_qty_base = nouvelle_qty * facteur_ligne
             ligne["quantite"] = nouvelle_qty
             ligne["quantite_base"] = nouvelle_qty_base
             ligne["total"] = nouvelle_qty_base * ligne["prix"]
+            
+            # ✅ Rafraîchir la treeview principale AVANT de fermer
             self._refresh_tree()
-            messagebox.showinfo("Succès", "Quantité modifiée avec succès")
+            
+            # ✅ Afficher le succès dans le label avant de fermer
+            status_var.set(f"✅ Quantité mise à jour: {nouvelle_qty:.2f}")
+            status_label.config(fg=CLR_GREEN)
+            
+            # ✅ Fermer après un court délai pour que l'utilisateur voie le message
+            self.after(500, dlg.destroy)
+        
+        def annuler_modification():
+            dlg.destroy()
+        
+        # Bind Entrée pour valider
+        entry_qty.bind('<Return>', lambda e: valider_modification())
+        entry_qty.bind('<Escape>', lambda e: annuler_modification())
+        
+        tk.Button(btn_frame, text="✅ Valider (Entrée)", command=valider_modification,
+                bg=CLR_GREEN, fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
+                padx=20, pady=8, cursor="hand2").pack(side="left", padx=10, expand=True, fill="x")
+        
+        tk.Button(btn_frame, text="❌ Annuler (Echap)", command=annuler_modification,
+                bg=CLR_RED, fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
+                padx=20, pady=8, cursor="hand2").pack(side="left", padx=10, expand=True, fill="x")
 
     def load_tiers_list(self):
         conn = get_conn()
@@ -7998,6 +8305,7 @@ class BonEditDialog(tk.Toplevel):
         self.lignes_originales = list(lignes)
         self.lignes = []
         self.title(f"✏ Modification Bon d'{bon_type.capitalize()}")
+        self.bind("<<ProduitsModifies>>", lambda e: self.refresh_produits())
         self.configure(bg=CLR_BG)
         self.state('zoomed')  # Pour Windows
 
@@ -8015,7 +8323,53 @@ class BonEditDialog(tk.Toplevel):
         self._build()
         self._charger_lignes()
         center_window(self, 900, 750)
+    def refresh_produits(self):
+        """✅ Rafraîchit la liste des produits dans le combobox pour BonEditDialog"""
+        conn = get_conn()
+        try:
+            prods = conn.execute("""SELECT id, code, designation, unite, facteur_conversion,
+                               prix_achat, prix_vente, barcode,
+                               prix_detail, prix_gros, prix_super_gros, prix_special,
+                               tva
+                        FROM produits WHERE actif = 1 ORDER BY designation""").fetchall()
+        finally:
+            conn.close()
+        
+        old_selection = self.prod_var.get() if hasattr(self, 'prod_var') else ""
+        self.prod_map = {}
+        new_prod_list = []
+        
+        for r in prods:
+            key = f"{r['code']} - {r['designation']}"
+            self.prod_map[key] = dict(r)
+            new_prod_list.append(key)
+        
+        # Mettre à jour la combobox des produits
+        self._update_combobox_produits(new_prod_list, old_selection)
+        
+        if old_selection in self.prod_map:
+            p = self.prod_map[old_selection]
+            px = p["prix_achat"] if self.bon_type == "achat" else p["prix_vente"]
+            self.prix_var.set(str(px))
+        elif new_prod_list:
+            self.prod_var.set(new_prod_list[0])
     
+    def _update_combobox_produits(self, new_prod_list, old_selection):
+        """Met à jour la combobox des produits"""
+        for child in self.winfo_children():
+            if hasattr(child, 'winfo_children'):
+                for subchild in child.winfo_children():
+                    if hasattr(subchild, 'winfo_children'):
+                        for grandchild in subchild.winfo_children():
+                            if isinstance(grandchild, ttk.Combobox):
+                                if grandchild['values'] and len(grandchild['values']) > 0:
+                                    if hasattr(self, 'prod_var') and grandchild.cget('textvariable') == str(self.prod_var):
+                                        grandchild['values'] = new_prod_list
+                                        if old_selection in new_prod_list:
+                                            self.prod_var.set(old_selection)
+                                        elif new_prod_list:
+                                            self.prod_var.set(new_prod_list[0])
+                                        return
     def _build(self):
         # ========== EN-TÊTE PRINCIPAL ==========
         top = tk.Frame(self, bg=CLR_CARD, padx=15, pady=12)
@@ -8105,7 +8459,15 @@ class BonEditDialog(tk.Toplevel):
         self.prod_var = tk.StringVar()
         pcb = combo(mid, list(self.prod_map.keys()), width=30, textvariable=self.prod_var)
         pcb.grid(row=0, column=1, padx=8)
+        # ✅ AJOUT DU BOUTON RAFRAÎCHIR
+        btn_refresh = tk.Button(mid, text="🔄", command=self.refresh_produits,
+                                bg=CLR_ACCENT, fg="white", relief="flat",
+                                font=("Segoe UI", 10, "bold"), padx=6, pady=2,
+                                cursor="hand2", width=3)
+        btn_refresh.grid(row=0, column=2, padx=2, pady=2)
+
         self.prod_var.trace_add("write", self._on_prod_change)
+
 
         lbl(mid, "Code Barre:", color=CLR_MUTED).grid(row=1, column=0, sticky="w", padx=4, pady=4)
         self.barcode_var = tk.StringVar()
@@ -8177,6 +8539,10 @@ class BonEditDialog(tk.Toplevel):
                 facteur = float(prod_info["facteur_conversion"]) if prod_info["facteur_conversion"] else 1
             except (KeyError, IndexError, TypeError):
                 facteur = 1
+
+            # ✅ Récupérer le taux TVA réel de la ligne (ou du produit à défaut)
+            tva_ligne = ligne["tva_taux"] if "tva_taux" in ligne.keys() and ligne["tva_taux"] is not None else float(prod_info["tva"] or 0)
+
             self.lignes.append({
                 "produit_id": ligne["produit_id"],
                 "designation": designation_key,
@@ -8186,7 +8552,8 @@ class BonEditDialog(tk.Toplevel):
                 "quantite": ligne["quantite"],
                 "facteur": facteur,
                 "prix": ligne["prix_unitaire"],
-                "total": ligne["total"]
+                "total": ligne["total"],
+                "tva": tva_ligne,   # ✅ ajouté
             })
         self._refresh_tree()
     
@@ -8230,28 +8597,114 @@ class BonEditDialog(tk.Toplevel):
             messagebox.showinfo("Non trouvé", f"Aucun produit trouvé pour: {normalized}")
 
     def edit_ligne(self):
+        """Modifier la quantité d'une ligne sélectionnée"""
         sel = self.tree.selection()
         if not sel:
-            messagebox.showwarning("Attention", "Veuillez sélectionner une ligne à modifier")
+            messagebox.showwarning("Avertissement", "Sélectionnez une ligne à modifier")
             return
         idx = int(sel[0])
         ligne = self.lignes[idx]
+        
+        # ✅ Fenêtre de dialogue dédiée
+        dlg = tk.Toplevel(self)
+        dlg.title("Modifier la quantité")
+        dlg.configure(bg=CLR_BG)
+        dlg.geometry("400x300")
+        dlg.transient(self)
+        dlg.grab_set()
+        dlg.resizable(False, True)
+        center_window(dlg, 400, 300)
+        
+        main_frame = tk.Frame(dlg, bg=CLR_BG, padx=20, pady=20)
+        main_frame.pack(fill="both", expand=True)
+        
+        lbl(main_frame, f"✏️ Modifier la quantité", 12, True, CLR_ACCENT).pack(pady=(0, 10))
+        
+        # Informations du produit
+        info_frame = tk.Frame(main_frame, bg=CLR_CARD, padx=15, pady=10)
+        info_frame.pack(fill="x", pady=5)
+        
         facteur = ligne.get("facteur", 1)
-        qte_affichee = ligne["quantite"] / facteur
-        nouvelle_qty = simpledialog.askfloat(
-            "Modifier quantité",
-            f"Produit: {ligne['designation']}\n"
-            f"Quantité actuelle: {qte_affichee:.2f}\n"
-            f"Prix unitaire: {ligne['prix']:.2f} DA\n\n"
-            f"Nouvelle quantité:",
-            initialvalue=qte_affichee,
-            minvalue=0.01
-        )
-        if nouvelle_qty and nouvelle_qty > 0:
-            ligne["quantite"] = nouvelle_qty * facteur
-            ligne["total"] = ligne["quantite"] * ligne["prix"]
+        qte_affichee = ligne["quantite"] / facteur if facteur else ligne["quantite"]
+        
+        lbl(info_frame, f"Produit: {ligne['designation']}", 10, True, CLR_TEXT).pack(anchor="w")
+        lbl(info_frame, f"Quantité actuelle: {qte_affichee:.2f} {ligne.get('unite', 'Pcs')}", 9, False, CLR_MUTED).pack(anchor="w")
+        lbl(info_frame, f"Prix unitaire: {ligne['prix']:.2f} DA", 9, False, CLR_MUTED).pack(anchor="w")
+        if ligne.get("remise_produit", 0) > 0:
+            lbl(info_frame, f"Remise: {ligne['remise_produit']:.0f}%", 9, False, CLR_ORANGE).pack(anchor="w")
+        
+        # Champ de saisie
+        input_frame = tk.Frame(main_frame, bg=CLR_BG)
+        input_frame.pack(fill="x", pady=10)
+        
+        lbl(input_frame, "Nouvelle quantité:", 9, False, CLR_MUTED).pack(side="left", padx=5)
+        new_qty_var = tk.StringVar(value=str(qte_affichee))
+        entry_qty = entry(input_frame, width=12, textvariable=new_qty_var, font=("Segoe UI", 11, "bold"))
+        entry_qty.pack(side="left", padx=10)
+        entry_qty.focus_set()
+        entry_qty.select_range(0, tk.END)
+        
+        # ✅ Message de statut
+        status_var = tk.StringVar(value="")
+        status_label = tk.Label(main_frame, textvariable=status_var, bg=CLR_BG, 
+                            fg=CLR_GREEN, font=("Segoe UI", 9, "bold"))
+        status_label.pack(pady=5)
+        
+        # Boutons
+        btn_frame = tk.Frame(main_frame, bg=CLR_BG)
+        btn_frame.pack(fill="x", pady=10)
+        
+        def valider_modification():
+            try:
+                nouvelle_qty = parse_decimal(new_qty_var.get())
+                if nouvelle_qty <= 0:
+                    status_var.set("❌ La quantité doit être > 0")
+                    status_label.config(fg=CLR_RED)
+                    return
+            except ValueError:
+                status_var.set("❌ Quantité invalide")
+                status_label.config(fg=CLR_RED)
+                return
+            
+            # Mettre à jour la ligne
+            facteur_ligne = ligne.get("facteur", 1)
+            nouvelle_qty_base = nouvelle_qty * facteur_ligne
+            ligne["quantite"] = nouvelle_qty_base
+            ligne["total_ht"] = nouvelle_qty_base * ligne["prix"]
+            ligne["total"] = ligne["total_ht"]
+            
+            tva_taux = ligne.get("tva", 0)
+            ligne["total_tva"] = ligne["total_ht"] * tva_taux / 100
+            ligne["total_ttc"] = ligne["total_ht"] + ligne["total_tva"]
+            
+            if ligne.get("remise_produit", 0) > 0:
+                ligne["prix_remise"] = ligne["prix"] * (1 - ligne["remise_produit"] / 100)
+                ligne["total_ht"] = nouvelle_qty_base * ligne["prix_remise"]
+            
+            # ✅ Rafraîchir AVANT de fermer
             self._refresh_tree()
-            messagebox.showinfo("Succès", "Quantité modifiée avec succès")
+            
+            # ✅ Message de succès
+            status_var.set(f"✅ Quantité mise à jour: {nouvelle_qty:.2f}")
+            status_label.config(fg=CLR_GREEN)
+            
+            # ✅ Fermer après un délai
+            self.after(500, dlg.destroy)
+        
+        def annuler_modification():
+            dlg.destroy()
+        
+        # Bind Entrée pour valider
+        entry_qty.bind('<Return>', lambda e: valider_modification())
+        entry_qty.bind('<Escape>', lambda e: annuler_modification())
+        
+        tk.Button(btn_frame, text="✅ Valider (Entrée)", command=valider_modification,
+                bg=CLR_GREEN, fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
+                padx=20, pady=8, cursor="hand2").pack(side="left", padx=10, expand=True, fill="x")
+        
+        tk.Button(btn_frame, text="❌ Annuler (Echap)", command=annuler_modification,
+                bg=CLR_RED, fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
+                padx=20, pady=8, cursor="hand2").pack(side="left", padx=10, expand=True, fill="x")
     
     def add_ligne(self):
         key = self.prod_var.get()
@@ -8460,10 +8913,16 @@ class BonEditDialog(tk.Toplevel):
                     self.bon_id)
                 )
                 for l in self.lignes:
+                    tva_taux = float(l.get("tva", 0))
+                    ht_l = l["total"]
+                    tva_l = ht_l * tva_taux / 100
+                    ttc_l = ht_l + tva_l
+
                     conn.execute(
-                        """INSERT INTO lignes_achat(bon_id, produit_id, quantite, prix_unitaire, total)
-                        VALUES(?,?,?,?,?)""",
-                        (self.bon_id, l["produit_id"], l["quantite"], l["prix"], l["total"])
+                        """INSERT INTO lignes_achat
+                        (bon_id, produit_id, quantite, prix_unitaire, total, total_ht, tva_taux, total_ttc)
+                        VALUES(?,?,?,?,?,?,?,?)""",
+                        (self.bon_id, l["produit_id"], l["quantite"], l["prix"], l["total"], ht_l, tva_taux, ttc_l)
                     )
                     nouveau_pmp, nouveau_cout = calculer_pmp(
                         conn, l["produit_id"], l["quantite"], l["prix"]
@@ -8903,11 +9362,48 @@ class App(tk.Tk):
         # Liaison de la touche F11 pour basculer le plein écran
         self.bind("<F11>", self.toggle_fullscreen)
         self.bind("<Escape>", self.quit_fullscreen)
-        
+        self.bind("<<ProduitsModifies>>", self.on_produits_modifies)
         init_db()
         self._pages = {}
         self._build()
-
+    def on_produits_modifies(self, event):
+        """✅ Relayé l'événement à toutes les fenêtres Toplevel ouvertes"""
+        print("📢 Événement ProduitsModifies reçu dans App !")  # Pour debug
+        
+        # Notifier toutes les pages ouvertes
+        for page in self._pages.values():
+            if hasattr(page, 'refresh_produits'):
+                try:
+                    page.refresh_produits()
+                except Exception as e:
+                    print(f"Erreur refresh page: {e}")
+        
+        # Notifier toutes les fenêtres Toplevel ouvertes (BonDialog, BonEditDialog, etc.)
+        for fenetre in self.winfo_children():
+            if isinstance(fenetre, tk.Toplevel):
+                if hasattr(fenetre, 'refresh_produits'):
+                    try:
+                        fenetre.refresh_produits()
+                    except Exception as e:
+                        print(f"Erreur refresh Toplevel: {e}")
+                else:
+                    # Chercher récursivement dans les enfants de la Toplevel
+                    self._chercher_refresh_dans_enfants(fenetre)
+    
+    def _chercher_refresh_dans_enfants(self, widget):
+        """Recherche récursivement un widget avec refresh_produits"""
+        if hasattr(widget, 'refresh_produits'):
+            try:
+                widget.refresh_produits()
+            except Exception as e:
+                print(f"Erreur refresh enfant: {e}")
+            return True
+        
+        if hasattr(widget, 'winfo_children'):
+            for enfant in widget.winfo_children():
+                if self._chercher_refresh_dans_enfants(enfant):
+                    return True
+        return False
     def toggle_fullscreen(self, event=None):
         """Basculer entre plein écran et mode fenêtré"""
         self.attributes('-fullscreen', not self.attributes('-fullscreen'))
@@ -9746,53 +10242,93 @@ class RetourPage(tk.Frame):
         if not sel:
             messagebox.showwarning("", "Sélectionnez un retour")
             return
-        
-        if messagebox.askyesno("Confirmation", "⚠️ Supprimer ce retour ?\nLe stock sera recalculé."):
-            conn = get_conn()
-            try:
-                retour_id = sel[0]
-                
-                # Récupérer les lignes pour ajuster le stock
-                lignes = conn.execute(f"SELECT * FROM {self.lignes_table} WHERE retour_id=?", (retour_id,)).fetchall()
-                
-                for l in lignes:
-                    if self.retour_type == "vente":
-                        # Remettre en stock
-                        conn.execute("UPDATE produits SET stock_actuel = stock_actuel + ? WHERE id=?",
-                                (l["quantite"], l["produit_id"]))
-                        # Recalculer le coût total (PMP inchangé, juste le coût total augmente)
-                        conn.execute("""
-                            UPDATE produits
-                            SET cout_total_stock = cout_total_stock + (prix_moyen_pondere * ?)
-                            WHERE id = ?
-                        """, (l["quantite"], l["produit_id"]))
-                    else:
-                        # Retour achat : retirer du stock et diminuer le coût total
-                        conn.execute("UPDATE produits SET stock_actuel = stock_actuel - ? WHERE id=?",
-                                (l["quantite"], l["produit_id"]))
-                        recalculer_cout_stock_apres_sortie(conn, l["produit_id"], l["quantite"])
-                
-                # Ajuster le solde du tiers
-                retour = conn.execute(f"SELECT * FROM {self.table} WHERE id=?", (retour_id,)).fetchone()
+
+        if not messagebox.askyesno("Confirmation", "⚠️ Supprimer ce retour ?\nLe stock sera recalculé."):
+            return
+
+        conn = get_conn()
+        try:
+            retour_id = sel[0]
+
+            # Récupérer le retour AVANT de supprimer les lignes
+            retour = conn.execute(
+                f"SELECT * FROM {self.table} WHERE id=?", (retour_id,)
+            ).fetchone()
+
+            lignes = conn.execute(
+                f"SELECT * FROM {self.lignes_table} WHERE retour_id=?", (retour_id,)
+            ).fetchall()
+
+            for l in lignes:
                 if self.retour_type == "vente":
-                    conn.execute(f"UPDATE {self.tiers_table} SET solde = solde - ? WHERE id=?", 
-                               (retour["total"], retour["client_id"]))
+                    # ✅ CORRECTION : supprimer un retour vente = annuler ce retour
+                    # Le retour avait remis les articles EN stock → on les ressort
+                    recalculer_cout_stock_apres_sortie(conn, l["produit_id"], l["quantite"])
+                    conn.execute(
+                        "UPDATE produits SET stock_actuel = stock_actuel - ? WHERE id=?",
+                        (l["quantite"], l["produit_id"])
+                    )
+                    # Recalculer le PMP après la sortie
+                    produit = conn.execute(
+                        "SELECT stock_actuel, cout_total_stock FROM produits WHERE id=?",
+                        (l["produit_id"],)
+                    ).fetchone()
+                    if produit["stock_actuel"] > 0:
+                        nouveau_pmp = produit["cout_total_stock"] / produit["stock_actuel"]
+                        conn.execute(
+                            "UPDATE produits SET prix_moyen_pondere = ? WHERE id=?",
+                            (nouveau_pmp, l["produit_id"])
+                        )
+                    else:
+                        conn.execute(
+                            "UPDATE produits SET prix_moyen_pondere = 0, cout_total_stock = 0 WHERE id=?",
+                            (l["produit_id"],)
+                        )
+
                 else:
-                    conn.execute(f"UPDATE {self.tiers_table} SET solde = solde - ? WHERE id=?", 
-                               (retour["total"], retour["fournisseur_id"]))
-                
-                # Supprimer les lignes et le retour
-                conn.execute(f"DELETE FROM {self.lignes_table} WHERE retour_id=?", (retour_id,))
-                conn.execute(f"DELETE FROM {self.table} WHERE id=?", (retour_id,))
-                
-                conn.commit()
-                messagebox.showinfo("Succès", "Retour supprimé")
-                self.refresh()
-            except Exception as e:
-                messagebox.showerror("Erreur", str(e))
-                conn.rollback()
-            finally:
-                conn.close()
+                    # ✅ CORRECTION : supprimer un retour achat = annuler ce retour
+                    # Le retour avait retiré les articles du stock → on les remet
+                    nouveau_pmp, nouveau_cout = calculer_pmp(
+                        conn, l["produit_id"], l["quantite"], l["prix_unitaire"]
+                    )
+                    conn.execute(
+                        """UPDATE produits
+                        SET stock_actuel       = stock_actuel + ?,
+                            prix_moyen_pondere = ?,
+                            cout_total_stock   = ?
+                        WHERE id = ?""",
+                        (l["quantite"], nouveau_pmp, nouveau_cout, l["produit_id"])
+                    )
+
+            # ✅ CORRECTION : ajuster le solde dans le bon sens selon le type
+            if self.retour_type == "vente":
+                # Le retour avait diminué le solde client → supprimer le retour
+                # remet le client débiteur → solde remonte
+                conn.execute(
+                    f"UPDATE {self.tiers_table} SET solde = solde + ? WHERE id=?",
+                    (retour["total"], retour["client_id"])
+                )
+            else:
+                # Le retour avait diminué le solde fournisseur → supprimer le retour
+                # remet le fournisseur créditeur → solde remonte
+                conn.execute(
+                    f"UPDATE {self.tiers_table} SET solde = solde + ? WHERE id=?",
+                    (retour["total"], retour["fournisseur_id"])
+                )
+
+            # Supprimer les lignes puis le retour
+            conn.execute(f"DELETE FROM {self.lignes_table} WHERE retour_id=?", (retour_id,))
+            conn.execute(f"DELETE FROM {self.table} WHERE id=?", (retour_id,))
+
+            conn.commit()
+            messagebox.showinfo("Succès", "Retour supprimé et stock recalculé")
+            self.refresh()
+
+        except Exception as e:
+            messagebox.showerror("Erreur", str(e))
+            conn.rollback()
+        finally:
+            conn.close()
     
     def print_retours(self):
         data = []
@@ -10201,32 +10737,51 @@ class RetourDialog(tk.Toplevel):
                     (retour_id, l["produit_id"], l["quantite"], l["prix"], l["total"])
                 )
                 if self.retour_type == "vente":
-                    conn.execute(
-                        "UPDATE produits SET stock_actuel = stock_actuel + ? WHERE id=?",
-                        (l["quantite"], l["produit_id"])
+                    # ✅ CORRECTION : Utiliser calculer_pmp() pour réintégrer le stock
+                    # avec le prix du retour (généralement le prix de vente ou un prix convenu)
+                    nouveau_pmp, nouveau_cout = calculer_pmp(
+                        conn, 
+                        l["produit_id"], 
+                        l["quantite"], 
+                        l["prix"]  # Prix du retour (prix de vente ou prix négocié)
                     )
+                    conn.execute(
+                        """UPDATE produits
+                        SET stock_actuel = stock_actuel + ?,
+                            prix_moyen_pondere = ?,
+                            cout_total_stock = ?
+                        WHERE id = ?""",
+                        (l["quantite"], nouveau_pmp, nouveau_cout, l["produit_id"])
+                    )
+                    # Diminuer le solde client (retour = moins de dette)
                     conn.execute(
                         "UPDATE clients SET solde = solde - ? WHERE id=?",
                         (l["total"], tiers_id)
                     )
-                else:
+                else:  # Retour achat
+                    # ✅ CORRECTION : Utiliser recalculer_cout_stock_apres_sortie()
                     conn.execute(
                         "UPDATE produits SET stock_actuel = stock_actuel - ? WHERE id=?",
                         (l["quantite"], l["produit_id"])
                     )
+                    # Recalculer le cout et le PMP après la sortie
+                    recalculer_cout_stock_apres_sortie(conn, l["produit_id"], l["quantite"])
+                    # Recalculer le PMP
+                    recalculer_pmp_apres_sortie_complete(conn, l["produit_id"])
+                    # Diminuer le solde fournisseur (retour = moins de dette)
                     conn.execute(
                         "UPDATE fournisseurs SET solde = solde - ? WHERE id=?",
                         (l["total"], tiers_id)
                     )
-            
-            conn.commit()
-            messagebox.showinfo("Succès", f"Retour {num} enregistré avec succès !")
-            self.destroy()
+                
+                conn.commit()
+                messagebox.showinfo("Succès", f"Retour {num} enregistré avec succès !")
+                self.destroy()
         except Exception as e:
-            messagebox.showerror("Erreur", str(e))
-            conn.rollback()
+                messagebox.showerror("Erreur", str(e))
+                conn.rollback()
         finally:
-            conn.close()
+                conn.close()
 
 class RetourDetailDialog(tk.Toplevel):
     """Dialogue de détail d'un retour"""

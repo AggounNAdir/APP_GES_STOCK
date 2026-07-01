@@ -405,21 +405,23 @@ def build_bon_html(profil, bon_data: dict, lignes: list, remises: list,
 
     total_ttc = total_ht + total_tva
 
-    # ── récapitulatif ──
+    # ── RÉCAPITULATIF (UNIQUEMENT ICI, EN DEHORS DU TABLEAU) ──
     recap_html = f"""
-    <div class="recap">
-      <div class="recap-row">
-        <span class="recap-label">Total HT</span>
-        <span class="recap-val">{_fmt(total_ht)} DA</span>
-      </div>
-      <div class="recap-row">
-        <span class="recap-label">TVA</span>
-        <span class="recap-val">{_fmt(total_tva)} DA</span>
-      </div>
-      <hr class="recap-sep">
-      <div class="recap-row recap-total">
-        <span class="recap-label">Total TTC</span>
-        <span class="recap-val">{_fmt(total_ttc)} DA</span>
+    <div class="recap" style="margin-top: 30px; page-break-inside: avoid;">
+      <div style="border-top: 2px solid var(--green); padding-top: 15px;">
+        <div class="recap-row">
+          <span class="recap-label">Total HT</span>
+          <span class="recap-val">{_fmt(total_ht)} DA</span>
+        </div>
+        <div class="recap-row">
+          <span class="recap-label">TVA</span>
+          <span class="recap-val">{_fmt(total_tva)} DA</span>
+        </div>
+        <hr class="recap-sep">
+        <div class="recap-row recap-total">
+          <span class="recap-label">⭐ TOTAL TTC</span>
+          <span class="recap-val" style="font-size: 18px;">{_fmt(total_ttc)} DA</span>
+        </div>
       </div>
     </div>"""
 
@@ -429,9 +431,6 @@ def build_bon_html(profil, bon_data: dict, lignes: list, remises: list,
       Document généré le {datetime.now().strftime('%d/%m/%Y à %H:%M:%S')}
     </div>"""
 
-    # ============================================================
-    # ✅ NOUVELLE MISE EN PAGE AVEC CSS INTÉGRÉ
-    # ============================================================
     return f"""<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -491,12 +490,28 @@ def build_bon_html(profil, bon_data: dict, lignes: list, remises: list,
         font-weight: 400;
     }}
     
-    /* Séparateur entre les sections */
     .header-divider {{
         width: 1px;
         background: #e5e7eb;
         align-self: stretch;
         margin: 0 10px;
+    }}
+    
+    /* ✅ GESTION DES SAUTS DE PAGE POUR L'IMPRESSION */
+    @media print {{
+        .recap {{
+            page-break-inside: avoid;
+            page-break-after: avoid;
+        }}
+        table {{
+            page-break-inside: auto;
+        }}
+        tr {{
+            page-break-inside: avoid;
+        }}
+        thead {{
+            display: table-header-group;
+        }}
     }}
     
     @media (max-width: 700px) {{
@@ -541,7 +556,7 @@ def build_bon_html(profil, bon_data: dict, lignes: list, remises: list,
     </div>
   </div>
 
-  <!-- ========== TABLEAU ========== -->
+  <!-- ========== TABLEAU (SANS TFOOT) ========== -->
   <table class="doc-table">
     <thead>
       <tr>
@@ -556,18 +571,15 @@ def build_bon_html(profil, bon_data: dict, lignes: list, remises: list,
         <th class="text-right">Total TTC</th>
       </tr>
     </thead>
-    <tbody>{rows_html}</tbody>
-    <tfoot>
-      <tr>
-        <td colspan="6" class="text-right">Totaux</td>
-        <td class="text-right">{_fmt(total_ht)} DA</td>
-        <td class="text-right">{_fmt(total_tva)} DA</td>
-        <td class="text-right">{_fmt(total_ttc)} DA</td>
-      </tr>
-    </tfoot>
+    <tbody>
+      {rows_html}
+    </tbody>
+    <!-- ✅ SUPPRESSION DU TFOOT - PLUS DE TOTAUX DANS LE TABLEAU -->
   </table>
 
+  <!-- ========== RÉCAPITULATIF UNIQUEMENT EN BAS ========== -->
   {recap_html}
+  
   {footer_html}
 </div>
 </body>
