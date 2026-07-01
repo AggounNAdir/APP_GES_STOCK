@@ -6150,33 +6150,214 @@ class VenteComptoirDialog(tk.Toplevel):
         super().__init__(parent)
         self.title("🛒 CAISSE ENREGISTREUSE - Vente Comptoir")
         self.configure(bg=CLR_BG)
-        self.geometry("1400x800")
+        self.geometry("1400x700")
         self.minsize(1200, 700)
-        center_window(self, 1400, 800)
+        center_window(self, 1400, 700)
         
+        # ✅ Initialiser toutes les variables AVANT _build()
         self.lignes = []
         self.montant_recu = 0
         self.monnaie = 0
-        self.calc_value = "0"
-        self.calc_memory = 0
-        self.calc_operation = None
-        self.calc_waiting = False
-        
-        self.remise_type = "aucune"
-        self.remise_valeur = 0
         self.total_avant_remise = 0
-        self.remise_appliquee = False
-        self.remise_motif = ""
         
-        # ✅ Créer les variables AVANT _build()
+        # ✅ Variables tkinter
         self.prix_var = tk.StringVar()
         self.prod_var = tk.StringVar()
         self.qty_var = tk.StringVar(value="1")
+        self.client_nom = tk.StringVar(value="COMPTOIR")
+        self.code_barre = tk.StringVar()
+        self.total_var = tk.StringVar(value="0.00 DA")
+        self.montant_recu_var = tk.StringVar(value="0")
+        self.monnaie_var = tk.StringVar(value="0.00 DA")
+        
+        # ✅ Maps et listes
+        self.prod_map = {}
+        self.prod_list = []
+        self.clients_map = {}
         
         self._build()
         self.after(100, lambda: self.code_barre_entry.focus())
+    
+    def _build(self):
+        # ============================================================
+        # 1. HEADER
+        # ============================================================
+        header = tk.Frame(self, bg=CLR_CARD, height=80)
+        header.pack(fill="x", padx=10, pady=(10,5))
+        header.pack_propagate(False)
+        
+        # Titre à gauche
+        title_frame = tk.Frame(header, bg=CLR_CARD)
+        title_frame.pack(side="left", fill="y", padx=15)
+        lbl(title_frame, "🏪 CAISSE ENREGISTREUSE", 18, True, color=CLR_GREEN).pack(anchor="w")
+        lbl(title_frame, "Mode Vente Comptoir", 9, color=CLR_MUTED).pack(anchor="w")
+        
+        # Date/Heure à droite
+        datetime_frame = tk.Frame(header, bg=CLR_CARD)
+        datetime_frame.pack(side="right", padx=15)
+        self.date_label = tk.Label(datetime_frame, font=("Segoe UI", 10), bg=CLR_CARD, fg=CLR_TEXT)
+        self.date_label.pack()
+        self.time_label = tk.Label(datetime_frame, font=("Segoe UI", 16, "bold"), bg=CLR_CARD, fg=CLR_ACCENT)
+        self.time_label.pack()
+        self.update_datetime()
+        
+        # Client (à droite avant la date)
+        client_frame = tk.Frame(header, bg=CLR_CARD)
+        client_frame.pack(side="right", padx=15)
+        lbl(client_frame, "Client:", color=CLR_MUTED, size=10).pack(side="left")
+        
+        self.client_combo = combo(client_frame, ["COMPTOIR"], width=18, textvariable=self.client_nom)
+        self.client_combo.pack(side="left", padx=5)
+        
+        tk.Button(client_frame, text="+ Client", command=self.creer_client_rapide,
+                  bg=CLR_GREEN, fg="white", relief="flat", font=("Segoe UI", 8, "bold"),
+                  padx=8, pady=2, cursor="hand2").pack(side="left", padx=5)
+        
+        self.charger_clients()
+        
+        # ============================================================
+        # 2. CONTENEUR PRINCIPAL (3 colonnes)
+        # ============================================================
+        main_container = tk.Frame(self, bg=CLR_BG)
+        main_container.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        # Configuration des colonnes avec des poids corrects
+        main_container.grid_columnconfigure(0, weight=1)   # Panneau gauche
+        main_container.grid_columnconfigure(1, weight=2)   # Panneau central
+        main_container.grid_columnconfigure(2, weight=1)   # Panneau droit
+        main_container.grid_rowconfigure(0, weight=1)
+        
+        # ============================================================
+        # 3. PANEL GAUCHE - Recherche et saisie
+        # ============================================================
+        left_panel = tk.Frame(main_container, bg=CLR_CARD, padx=12, pady=12)
+        left_panel.grid(row=0, column=0, sticky="nsew", padx=(0,5))
+        
+        # --- Titre ---
+        lbl(left_panel, "🔍 RECHERCHE", 12, True, color=CLR_ACCENT).pack(anchor="w", pady=(0,10))
+        
+        # --- Code barre ---
+        scan_frame = tk.Frame(left_panel, bg=CLR_CARD)
+        scan_frame.pack(fill="x", pady=5)
+        lbl(scan_frame, "Code barre:", color=CLR_MUTED, size=9).pack(side="left")
+        
+        self.code_barre_entry = tk.Entry(scan_frame, width=20, textvariable=self.code_barre,
+                                         bg=CLR_INPUT, fg=CLR_TEXT, font=("Segoe UI", 11),
+                                         relief="flat", highlightthickness=1)
+        self.code_barre_entry.pack(side="left", padx=8)
+        self.code_barre_entry.bind("<Return>", lambda e: self.recherche_par_code())
+        
+        tk.Button(scan_frame, text="Chercher", command=self.recherche_par_code,
+                  bg=CLR_ACCENT, fg="white", relief="flat", cursor="hand2",
+                  font=("Segoe UI", 8), padx=10).pack(side="left")
+        
+        # --- Sélection produit ---
+        lbl(left_panel, "Sélection produit:", color=CLR_MUTED, size=9).pack(anchor="w", pady=(15,5))
+        
+        self.charger_produits()
+        
+        self.prod_combo = combo(left_panel, self.prod_list, width=30, textvariable=self.prod_var)
+        self.prod_combo.pack(fill="x", pady=5)
+        self.prod_combo.bind("<<ComboboxSelected>>", self.on_produit_selectionne)
+        
+        # --- Quantité et Prix sur une ligne ---
+        qty_frame = tk.Frame(left_panel, bg=CLR_CARD)
+        qty_frame.pack(fill="x", pady=8)
+        
+        lbl(qty_frame, "Qté:", color=CLR_MUTED, size=9).pack(side="left", padx=2)
+        entry(qty_frame, width=8, textvariable=self.qty_var, font=("Segoe UI", 11)).pack(side="left", padx=5)
+        
+        lbl(qty_frame, "Prix:", color=CLR_MUTED, size=9).pack(side="left", padx=(15,2))
+        entry(qty_frame, width=10, textvariable=self.prix_var, font=("Segoe UI", 11)).pack(side="left", padx=5)
+        
+        # --- Boutons ---
+        btn_frame = tk.Frame(left_panel, bg=CLR_CARD)
+        btn_frame.pack(fill="x", pady=5)
+        
+        tk.Button(btn_frame, text="➕ AJOUTER", command=self.ajouter_ligne,
+                  bg=CLR_GREEN, fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
+                  padx=15, pady=8, cursor="hand2").pack(side="left", fill="x", expand=True, padx=2)
+        
+        tk.Button(btn_frame, text="🔄 Rafraîchir", command=self.charger_produits,
+                  bg=CLR_ACCENT, fg="white", relief="flat", font=("Segoe UI", 9, "bold"),
+                  padx=10, pady=8, cursor="hand2").pack(side="left", fill="x", expand=True, padx=2)
+        
+        # ============================================================
+        # 4. PANEL CENTRAL - Panier
+        # ============================================================
+        center_panel = tk.Frame(main_container, bg=CLR_CARD, padx=12, pady=12)
+        center_panel.grid(row=0, column=1, sticky="nsew", padx=5)
+                
+        # Tableau du panier
+        cols = ["Code", "Produit", "Qté", "Prix", "Total"]
+        widths = [80, 280, 60, 80, 100]
+        tf, self.tree = make_tree(center_panel, cols, widths)
+        tf.pack(fill="both", expand=True, pady=5)
+        
+        # Boutons du panier
+        panier_btn_frame = tk.Frame(center_panel, bg=CLR_CARD)
+        panier_btn_frame.pack(fill="x", pady=8)
+        
+        tk.Button(panier_btn_frame, text="🗑 Supprimer", command=self.supprimer_ligne,
+                  bg=CLR_RED, fg="white", relief="flat", font=("Segoe UI", 8, "bold"),
+                  padx=10, pady=4, cursor="hand2").pack(side="left", padx=3)
+        
+        tk.Button(panier_btn_frame, text="🔄 Modifier Qté", command=self.modifier_quantite,
+                  bg=CLR_ORANGE, fg="white", relief="flat", font=("Segoe UI", 8, "bold"),
+                  padx=10, pady=4, cursor="hand2").pack(side="left", padx=3)
+        
+        tk.Button(panier_btn_frame, text="🗑 Vider", command=self.vider_panier,
+                  bg=CLR_BORDER, fg="white", relief="flat", font=("Segoe UI", 8, "bold"),
+                  padx=10, pady=4, cursor="hand2").pack(side="left", padx=3)
+        
+        # ============================================================
+        # 5. PANEL DROIT - Encaissement
+        # ============================================================
+        right_panel = tk.Frame(main_container, bg=CLR_CARD, padx=12, pady=12)
+        right_panel.grid(row=0, column=2, sticky="nsew", padx=(5,0))
+        
+        # Total
+        total_frame = tk.Frame(right_panel, bg=CLR_CARD)
+        total_frame.pack(fill="x", pady=5)
+        lbl(total_frame, "TOTAL À PAYER", 10, True, color=CLR_TEXT).pack(side="left")
+        tk.Label(total_frame, textvariable=self.total_var, bg=CLR_CARD, 
+                 fg=CLR_GREEN, font=("Segoe UI", 20, "bold")).pack(side="right")
+        
+        # Montant reçu
+        recu_frame = tk.Frame(right_panel, bg=CLR_CARD)
+        recu_frame.pack(fill="x", pady=8)
+        lbl(recu_frame, "Montant reçu:", 9, True).pack(side="left")
+        
+        self.montant_recu_entry = entry(recu_frame, width=12, textvariable=self.montant_recu_var, 
+                                        font=("Segoe UI", 12), justify="right")
+        self.montant_recu_entry.pack(side="right", padx=5)
+        self.montant_recu_entry.bind("<KeyRelease>", self.calculer_monnaie)
+        
+        # Monnaie à rendre
+        monnaie_frame = tk.Frame(right_panel, bg=CLR_CARD)
+        monnaie_frame.pack(fill="x", pady=8)
+        lbl(monnaie_frame, "Monnaie à rendre:", 9, True).pack(side="left")
+        tk.Label(monnaie_frame, textvariable=self.monnaie_var, bg=CLR_CARD, 
+                 fg=CLR_ORANGE, font=("Segoe UI", 14, "bold")).pack(side="right")
+        
+        # Séparateur
+        tk.Frame(right_panel, bg=CLR_BORDER, height=2).pack(fill="x", pady=8)
+        
+        # Boutons d'action
+        tk.Button(right_panel, text="✅ VALIDER", command=self.valider_vente,
+                  bg=CLR_GREEN, fg="white", relief="flat", font=("Segoe UI", 11, "bold"),
+                  padx=15, pady=10, cursor="hand2").pack(fill="x", pady=5)
+        
+        tk.Button(right_panel, text="🖨 TICKET", command=self.imprimer_ticket_rapide,
+                  bg=CLR_ACCENT, fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
+                  padx=15, pady=8, cursor="hand2").pack(fill="x", pady=5)
+        
+        tk.Button(right_panel, text="❌ ANNULER", command=self.destroy,
+                  bg=CLR_RED, fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
+                  padx=15, pady=8, cursor="hand2").pack(fill="x", pady=5)
+    
     def charger_produits(self):
-        """✅ Recharge la liste des produits (pour le bouton Rafraîchir)"""
+        """Charge/recharge la liste des produits"""
         conn = get_conn()
         try:
             prods = conn.execute("""SELECT id, code, designation, unite, facteur_conversion,
@@ -6193,194 +6374,14 @@ class VenteComptoirDialog(tk.Toplevel):
             self.prod_map[display] = dict(r)
             self.prod_list.append(display)
         
-        self.prod_combo['values'] = self.prod_list
+        if hasattr(self, 'prod_combo'):
+            self.prod_combo['values'] = self.prod_list
         
-        # Garder la sélection actuelle si elle existe encore
+        # Garder la sélection actuelle si possible
         current = self.prod_var.get()
-        if current in self.prod_map:
-            # Conserver la sélection
-            pass
-        elif self.prod_list:
+        if current not in self.prod_map and self.prod_list:
             self.prod_var.set(self.prod_list[0])
-        
-        # Notification visuelle (optionnelle)
-        self._afficher_notification("✅ Liste des produits rafraîchie")
     
-    def _afficher_notification(self, message):
-        """Affiche une notification temporaire"""
-        notification = tk.Label(self, text=message, bg=CLR_GREEN, fg="white",
-                               font=("Segoe UI", 10, "bold"), padx=20, pady=10)
-        notification.place(relx=0.5, rely=0.02, anchor="n")
-        self.after(3000, notification.destroy)
-    def _build(self):
-        # Header
-        header = tk.Frame(self, bg=CLR_CARD, height=100)
-        header.pack(fill="x", padx=10, pady=(10,5))
-        header.pack_propagate(False)
-        
-        title_frame = tk.Frame(header, bg=CLR_CARD)
-        title_frame.pack(side="left", fill="y", padx=15)
-        lbl(title_frame, "🏪 CAISSE ENREGISTREUSE", 18, True, color=CLR_GREEN).pack(anchor="w")
-        lbl(title_frame, "Mode Vente Comptoir", 9, color=CLR_MUTED).pack(anchor="w")
-        
-        datetime_frame = tk.Frame(header, bg=CLR_CARD)
-        datetime_frame.pack(side="right", padx=15)
-        self.date_label = tk.Label(datetime_frame, font=("Segoe UI", 10), bg=CLR_CARD, fg=CLR_TEXT)
-        self.date_label.pack()
-        self.time_label = tk.Label(datetime_frame, font=("Segoe UI", 16, "bold"), bg=CLR_CARD, fg=CLR_ACCENT)
-        self.time_label.pack()
-        self.update_datetime()
-        
-        client_frame = tk.Frame(header, bg=CLR_CARD)
-        client_frame.pack(side="right", padx=15)
-        lbl(client_frame, "Client:", color=CLR_MUTED, size=10).pack(side="left")
-        self.client_nom = tk.StringVar(value="COMPTOIR")
-        self.client_combo = combo(client_frame, ["COMPTOIR"], width=18, textvariable=self.client_nom)
-        self.client_combo.pack(side="left", padx=5)
-        tk.Button(client_frame, text="+ Client", command=self.creer_client_rapide,
-                  bg=CLR_GREEN, fg="white", relief="flat", font=("Segoe UI", 8, "bold"),
-                  padx=8, pady=2, cursor="hand2").pack(side="left", padx=5)
-        self.charger_clients()
-        
-        # Main container
-        main_container = tk.Frame(self, bg=CLR_BG)
-        main_container.pack(fill="both", expand=True, padx=10, pady=5)
-        main_container.grid_columnconfigure(0, weight=30)
-        main_container.grid_columnconfigure(1, weight=45)
-        main_container.grid_columnconfigure(2, weight=25)
-        main_container.grid_rowconfigure(0, weight=1)
-        
-        # Left panel - Recherche
-        left_panel = tk.Frame(main_container, bg=CLR_CARD, padx=12, pady=12)
-        left_panel.grid(row=0, column=0, sticky="nsew", padx=(0,5))
-        
-        lbl(left_panel, "🔍 RECHERCHE", 12, True, color=CLR_ACCENT).pack(anchor="w", pady=(0,10))
-        
-        scan_frame = tk.Frame(left_panel, bg=CLR_CARD)
-        scan_frame.pack(fill="x", pady=5)
-        lbl(scan_frame, "Code barre:", color=CLR_MUTED, size=9).pack(side="left")
-        self.code_barre = tk.StringVar()
-        self.code_barre_entry = tk.Entry(scan_frame, width=20, textvariable=self.code_barre,
-                                         bg=CLR_INPUT, fg=CLR_TEXT, font=("Segoe UI", 11),
-                                         relief="flat", highlightthickness=1)
-        self.code_barre_entry.pack(side="left", padx=8)
-        self.code_barre_entry.bind("<Return>", lambda e: self.recherche_par_code())
-        tk.Button(scan_frame, text="Chercher", command=self.recherche_par_code,
-                  bg=CLR_ACCENT, fg="white", relief="flat", cursor="hand2",
-                  font=("Segoe UI", 8), padx=10).pack(side="left")
-        
-        lbl(left_panel, "Sélection produit:", color=CLR_MUTED, size=9).pack(anchor="w", pady=(15,5))
-        
-        # Charger les produits
-        conn = get_conn()
-        prods = conn.execute("""SELECT id, code, designation, unite, facteur_conversion,
-                               prix_achat, prix_vente, barcode, stock_actuel,
-                               prix_detail, prix_gros, prix_super_gros, prix_special
-                        FROM produits WHERE actif = 1 ORDER BY designation""").fetchall() 
-        conn.close()
-        
-        self.prod_map = {}
-        self.prod_list = []
-        for r in prods:
-            display = f"{r['code']} - {r['designation']} ({r['prix_vente']:.2f} DA)"
-            self.prod_map[display] = dict(r)
-            self.prod_list.append(display)
-        
-        self.prod_combo = combo(left_panel, self.prod_list, width=30, textvariable=self.prod_var)
-        self.prod_combo.pack(fill="x", pady=5)
-        self.prod_combo.bind("<<ComboboxSelected>>", self.on_produit_selectionne)
-        
-        # ✅ CRÉER LE PRIX SELECTOR APRÈS AVOIR CRÉÉ prix_var
-        self.prix_selector = prix_niveaux.PrixSelectorWidget(
-            left_panel,
-            prix_var=self.prix_var,  # ✅ Maintenant self.prix_var existe
-            client_id_fn=lambda: self.clients_map.get(self.client_nom.get()) 
-                                if hasattr(self, 'clients_map') else None
-        )
-        self.prix_selector.pack(fill="x", pady=5)
-        
-        # ✅ Frame pour Qté et Prix
-        qty_frame = tk.Frame(left_panel, bg=CLR_CARD)
-        qty_frame.pack(fill="x", pady=8)
-        
-        lbl(qty_frame, "Qté:", color=CLR_MUTED, size=9).pack(side="left", padx=2)
-        entry(qty_frame, width=8, textvariable=self.qty_var, font=("Segoe UI", 11)).pack(side="left", padx=5)
-        
-        lbl(qty_frame, "Prix:", color=CLR_MUTED, size=9).pack(side="left", padx=(15,2))
-        entry(qty_frame, width=10, textvariable=self.prix_var, font=("Segoe UI", 11)).pack(side="left", padx=5)
-        
-        tk.Button(left_panel, text="➕ AJOUTER", command=self.ajouter_ligne,
-                  bg=CLR_GREEN, fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
-                  padx=15, pady=8, cursor="hand2").pack(fill="x", pady=10)
-        
-        # Center panel - Panier
-        center_panel = tk.Frame(main_container, bg=CLR_CARD, padx=12, pady=12)
-        center_panel.grid(row=0, column=1, sticky="nsew", padx=5)
-        
-        lbl(center_panel, "🛒 PANIER", 12, True, color=CLR_ORANGE).pack(anchor="w", pady=(0,10))
-        
-        cols = ["Code", "Produit", "Qté", "Prix", "Total"]
-        widths = [80, 280, 60, 80, 100]
-        tf, self.tree = make_tree(center_panel, cols, widths)
-        tf.pack(fill="both", expand=True, pady=5)
-        
-        panier_btn_frame = tk.Frame(center_panel, bg=CLR_CARD)
-        panier_btn_frame.pack(fill="x", pady=8)
-        
-        tk.Button(panier_btn_frame, text="🗑 Supprimer", command=self.supprimer_ligne,
-                  bg=CLR_RED, fg="white", relief="flat", font=("Segoe UI", 8, "bold"),
-                  padx=10, pady=4, cursor="hand2").pack(side="left", padx=3)
-        
-        tk.Button(panier_btn_frame, text="🔄 Modifier Qté", command=self.modifier_quantite,
-                  bg=CLR_ORANGE, fg="white", relief="flat", font=("Segoe UI", 8, "bold"),
-                  padx=10, pady=4, cursor="hand2").pack(side="left", padx=3)
-        
-        tk.Button(panier_btn_frame, text="🗑 Vider", command=self.vider_panier,
-                  bg=CLR_BORDER, fg="white", relief="flat", font=("Segoe UI", 8, "bold"),
-                  padx=10, pady=4, cursor="hand2").pack(side="left", padx=3)
-        
-        # Right panel - Encaissement
-        right_panel = tk.Frame(main_container, bg=CLR_CARD, padx=12, pady=12)
-        right_panel.grid(row=0, column=2, sticky="nsew", padx=(5,0))
-        
-        total_frame = tk.Frame(right_panel, bg=CLR_CARD)
-        total_frame.pack(fill="x", pady=5)
-        lbl(total_frame, "TOTAL À PAYER", 10, True, color=CLR_TEXT).pack(side="left")
-        self.total_var = tk.StringVar(value="0.00 DA")
-        tk.Label(total_frame, textvariable=self.total_var, bg=CLR_CARD, 
-                 fg=CLR_GREEN, font=("Segoe UI", 20, "bold")).pack(side="right")
-        
-        recu_frame = tk.Frame(right_panel, bg=CLR_CARD)
-        recu_frame.pack(fill="x", pady=8)
-        lbl(recu_frame, "Montant reçu:", 9, True).pack(side="left")
-        self.montant_recu_var = tk.StringVar(value="0")
-        self.montant_recu_entry = entry(recu_frame, width=12, textvariable=self.montant_recu_var, 
-                                        font=("Segoe UI", 12), justify="right")
-        self.montant_recu_entry.pack(side="right", padx=5)
-        self.montant_recu_entry.bind("<KeyRelease>", self.calculer_monnaie)
-        
-        monnaie_frame = tk.Frame(right_panel, bg=CLR_CARD)
-        monnaie_frame.pack(fill="x", pady=8)
-        lbl(monnaie_frame, "Monnaie à rendre:", 9, True).pack(side="left")
-        self.monnaie_var = tk.StringVar(value="0.00 DA")
-        tk.Label(monnaie_frame, textvariable=self.monnaie_var, bg=CLR_CARD, 
-                 fg=CLR_ORANGE, font=("Segoe UI", 14, "bold")).pack(side="right")
-        
-        tk.Frame(right_panel, bg=CLR_BORDER, height=2).pack(fill="x", pady=8)
-        
-        # Buttons
-        tk.Button(right_panel, text="✅ VALIDER", command=self.valider_vente,
-                  bg=CLR_GREEN, fg="white", relief="flat", font=("Segoe UI", 11, "bold"),
-                  padx=15, pady=10, cursor="hand2").pack(fill="x", pady=5)
-        
-        tk.Button(right_panel, text="🖨 TICKET", command=self.imprimer_ticket_rapide,
-                  bg=CLR_ACCENT, fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
-                  padx=15, pady=8, cursor="hand2").pack(fill="x", pady=5)
-        
-        tk.Button(right_panel, text="❌ ANNULER", command=self.destroy,
-                  bg=CLR_RED, fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
-                  padx=15, pady=8, cursor="hand2").pack(fill="x", pady=5)
-
     def update_datetime(self):
         now = datetime.now()
         self.date_label.config(text=now.strftime("%A %d %B %Y").upper())
@@ -6389,12 +6390,12 @@ class VenteComptoirDialog(tk.Toplevel):
     
     def charger_clients(self):
         conn = get_conn()
-        try:                                          # ✅ AJOUT try/finally
+        try:
             clients = conn.execute(
                 "SELECT id, nom FROM clients ORDER BY nom"
             ).fetchall()
         finally:
-            conn.close()                             # ✅ toujours fermée
+            conn.close()
         
         self.clients_map = {}
         client_liste = []
@@ -6441,7 +6442,9 @@ class VenteComptoirDialog(tk.Toplevel):
             for display, p in self.prod_map.items():
                 if p["id"] == produit["id"]:
                     self.prod_var.set(display)
-                    self.prix_var.set(str(produit["prix_vente"]))
+                    # ✅ Utiliser le prix de détail
+                    prix_detail = produit.get("prix_detail", 0) or produit.get("prix_vente", 0)
+                    self.prix_var.set(str(prix_detail))
                     self.qty_var.set("1")
                     self.code_barre.set("")
                     self.ajouter_ligne()
@@ -6453,10 +6456,9 @@ class VenteComptoirDialog(tk.Toplevel):
         key = self.prod_var.get()
         if key in self.prod_map:
             p = self.prod_map[key]
-            if hasattr(self, 'prix_selector'):
-                self.prix_selector.set_produit(p)
-            else:
-                self.prix_var.set(str(p["prix_vente"]))
+            # ✅ Utiliser le prix de détail
+            prix = p.get("prix_detail", 0) or p.get("prix_vente", 0)
+            self.prix_var.set(str(prix))
     
     def ajouter_ligne(self):
         key = self.prod_var.get()
@@ -6478,7 +6480,7 @@ class VenteComptoirDialog(tk.Toplevel):
         
         prod = self.prod_map[key]
         
-        # ✅ CORRECTION : convertir la saisie en unités de stock pour comparaison
+        # Convertir la saisie en unités de stock pour comparaison
         facteur = float(prod.get("facteur_conversion") or 1)
         qty_en_unites = qty * facteur
         stock_en_cartons = prod["stock_actuel"] / facteur if facteur else prod["stock_actuel"]
@@ -6503,7 +6505,7 @@ class VenteComptoirDialog(tk.Toplevel):
                 self.qty_var.set("1")
                 return
         
-        total = qty_en_unites * prix  # ✅ total basé sur les unités de stock
+        total = qty_en_unites * prix
         self.lignes.append({
             "produit_id": prod["id"],
             "code": prod["code"],
@@ -6516,6 +6518,7 @@ class VenteComptoirDialog(tk.Toplevel):
         })
         self._refresh_panier()
         self.qty_var.set("1")
+    
     def supprimer_ligne(self):
         sel = self.tree.selection()
         if not sel:
@@ -6536,8 +6539,11 @@ class VenteComptoirDialog(tk.Toplevel):
                                             f"Quantité: {ligne['quantite']}\nNouvelle valeur:",
                                             initialvalue=ligne['quantite'], parent=self)
         if nouvelle_qty and nouvelle_qty > 0:
+            # ✅ Mettre à jour la quantité en unité d'affichage
+            facteur = ligne.get("facteur", 1)
             ligne["quantite"] = nouvelle_qty
-            ligne["total"] = ligne["quantite"] * ligne["prix"]
+            ligne["qty_base"] = nouvelle_qty * facteur
+            ligne["total"] = ligne["qty_base"] * ligne["prix"]
             self._refresh_panier()
     
     def vider_panier(self):
@@ -6578,7 +6584,6 @@ class VenteComptoirDialog(tk.Toplevel):
         total = self.total_avant_remise
         client_nom = self.client_nom.get()
         
-        # ✅ CORRECTION : définir client_id EN PREMIER
         client_id = self.clients_map.get(client_nom)
         if not client_id:
             messagebox.showerror("Erreur", f"Client '{client_nom}' introuvable", parent=self)
@@ -6606,7 +6611,6 @@ class VenteComptoirDialog(tk.Toplevel):
         ):
             return
         
-        # ✅ CORRECTION : numéro généré APRÈS avoir défini client_id
         num = next_numero_tiers("BV", client_id)
         dt = date.today().strftime("%Y-%m-%d")
         
@@ -6621,7 +6625,6 @@ class VenteComptoirDialog(tk.Toplevel):
             ).fetchone()["id"]
             
             for l in self.lignes:
-                # ✅ CORRECTION : convertir cartons → unités de stock
                 facteur_l = float(l.get("facteur", 1) or 1)
                 qty_base = l["quantite"] * facteur_l
                 
@@ -6632,7 +6635,7 @@ class VenteComptoirDialog(tk.Toplevel):
                 )
                 conn.execute(
                     "UPDATE produits SET stock_actuel = stock_actuel - ? WHERE id=?",
-                    (qty_base, l["produit_id"])   # ✅ unités de base
+                    (qty_base, l["produit_id"])
                 )
             
             if client_nom != "COMPTOIR":
@@ -6647,7 +6650,6 @@ class VenteComptoirDialog(tk.Toplevel):
                 f"✅ Vente enregistrée!\nBon: {num}\nMonnaie: {monnaie:,.2f} DA",
                 parent=self
             )
-            self.destroy()
         except Exception as ex:
             conn.rollback()
             messagebox.showerror("Erreur", str(ex), parent=self)
@@ -6655,36 +6657,230 @@ class VenteComptoirDialog(tk.Toplevel):
             conn.close()
     
     def imprimer_ticket(self, num, client_nom, total, recu, monnaie):
+        """Affiche le ticket avec bouton d'impression"""
+        
+        # ✅ Créer la fenêtre du ticket
         preview = tk.Toplevel(self)
         preview.title(f"TICKET N°{num}")
         preview.configure(bg="white")
-        preview.geometry("380x550")
-        center_window(preview, 380, 550)
+        preview.geometry("400x600")
+        preview.resizable(False, False)
         
-        ticket_frame = tk.Frame(preview, bg="white", padx=15, pady=15)
-        ticket_frame.pack(fill="both", expand=True)
+        # ✅ Garder la fenêtre au premier plan
+        preview.transient(self)
+        preview.grab_set()
+        preview.focus_force()
+        preview.lift()
         
-        tk.Label(ticket_frame, text="VOTRE MAGASIN", font=("Courier", 12, "bold"), bg="white").pack()
-        tk.Label(ticket_frame, text="-"*30, font=("Courier", 8), bg="white").pack(pady=5)
-        tk.Label(ticket_frame, text=f"Ticket: {num}", font=("Courier", 9, "bold"), bg="white").pack(anchor="w")
-        tk.Label(ticket_frame, text=f"Date: {datetime.now().strftime('%d/%m/%Y %H:%M')}", font=("Courier", 8), bg="white").pack(anchor="w")
-        tk.Label(ticket_frame, text=f"Client: {client_nom}", font=("Courier", 8), bg="white").pack(anchor="w")
-        tk.Label(ticket_frame, text="-"*30, font=("Courier", 8), bg="white").pack(pady=5)
+        # ✅ Centrer
+        center_window(preview, 400, 600)
         
-        for l in self.lignes:
-            line = f"{l['quantite']:.0f} x {l['designation'][:20]} = {l['total']:.2f} DA"
-            tk.Label(ticket_frame, text=line, font=("Courier", 8), bg="white", anchor="w").pack(fill="x")
+        # ✅ Conteneur principal
+        main_frame = tk.Frame(preview, bg="white")
+        main_frame.pack(fill="both", expand=True)
         
-        tk.Label(ticket_frame, text="-"*30, font=("Courier", 8), bg="white").pack(pady=5)
-        tk.Label(ticket_frame, text=f"TOTAL: {total:,.2f} DA", font=("Courier", 10, "bold"), bg="white", fg="green").pack(anchor="e")
-        tk.Label(ticket_frame, text=f"Reçu: {recu:,.2f} DA", font=("Courier", 9), bg="white").pack(anchor="e")
-        tk.Label(ticket_frame, text=f"Monnaie: {monnaie:,.2f} DA", font=("Courier", 9, "bold"), bg="white", fg="orange").pack(anchor="e")
-        tk.Label(ticket_frame, text="-"*30, font=("Courier", 8), bg="white").pack(pady=5)
-        tk.Label(ticket_frame, text="MERCI", font=("Courier", 10, "bold"), bg="white").pack()
+        # ✅ Zone de texte pour le ticket
+        text_frame = tk.Frame(main_frame, bg="white")
+        text_frame.pack(fill="both", expand=True, padx=15, pady=10)
         
-        btn_frame = tk.Frame(preview, bg="white", pady=10)
-        btn_frame.pack(fill="x")
-        tk.Button(btn_frame, text="Fermer", command=preview.destroy, bg=CLR_ACCENT, fg="white", padx=15, pady=5).pack()
+        text_widget = tk.Text(text_frame, bg="white", fg="black", 
+                            font=("Courier", 10), wrap="none",
+                            relief="flat", highlightthickness=0)
+        text_widget.pack(side="left", fill="both", expand=True)
+        
+        # ✅ Scrollbar
+        scrollbar = tk.Scrollbar(text_frame, orient="vertical", command=text_widget.yview)
+        scrollbar.pack(side="right", fill="y")
+        text_widget.config(yscrollcommand=scrollbar.set)
+        
+        # ✅ Construire le contenu du ticket
+        content = []
+        content.append("=" * 32)
+        content.append("       VOTRE MAGASIN")
+        content.append("=" * 32)
+        content.append("")
+        content.append(f"Ticket: {num}")
+        content.append(f"Date  : {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+        content.append(f"Client: {client_nom}")
+        content.append("")
+        content.append("-" * 32)
+        content.append("")
+        
+        # ✅ Lignes de produits
+        for i, l in enumerate(self.lignes, 1):
+            designation = l['designation'][:25]
+            qty = l['quantite']
+            total_ligne = l['total']
+            content.append(f"{i:2d}. {designation}")
+            content.append(f"    {qty:6.0f} x {l['prix']:8.2f} = {total_ligne:10.2f} DA")
+            content.append("")
+        
+        content.append("-" * 32)
+        content.append("")
+        content.append(f"TOTAL À PAYER : {total:>12,.2f} DA")
+        content.append(f"Montant reçu   : {recu:>12,.2f} DA")
+        content.append(f"Monnaie        : {monnaie:>12,.2f} DA")
+        content.append("")
+        content.append("-" * 32)
+        content.append("")
+        content.append("         MERCI DE VOTRE VISITE !")
+        content.append("")
+        content.append("=" * 32)
+        
+        # ✅ Insérer le contenu
+        text_widget.insert("1.0", "\n".join(content))
+        text_widget.config(state="disabled")
+        
+        # ✅ Boutons en bas
+        btn_frame = tk.Frame(main_frame, bg="white", pady=10)
+        btn_frame.pack(fill="x", padx=15)
+        
+        # ✅ Bouton Imprimer
+        btn_imprimer = tk.Button(
+            btn_frame,
+            text="🖨  IMPRIMER",
+            command=lambda: self._imprimer_ticket_html(content, num),
+            bg=CLR_ACCENT,
+            fg="white",
+            font=("Segoe UI", 10, "bold"),
+            padx=20,
+            pady=8,
+            cursor="hand2",
+            relief="flat"
+        )
+        btn_imprimer.pack(side="left", expand=True, fill="x", padx=5)
+        
+        # ✅ Bouton Fermer
+        btn_fermer = tk.Button(
+            btn_frame,
+            text="✕  FERMER",
+            command=lambda: self._fermer_ticket(preview),
+            bg=CLR_RED,
+            fg="white",
+            font=("Segoe UI", 10, "bold"),
+            padx=20,
+            pady=8,
+            cursor="hand2",
+            relief="flat"
+        )
+        btn_fermer.pack(side="left", expand=True, fill="x", padx=5)
+        
+        # ✅ Focus sur le bouton Imprimer
+        btn_imprimer.focus_set()
+        
+        # ✅ Raccourcis clavier
+        preview.bind("<Escape>", lambda e: self._fermer_ticket(preview))
+        preview.bind("<Return>", lambda e: self._imprimer_ticket_html(content, num))
+
+    def _imprimer_ticket_html(self, content, num):
+        """Imprime le ticket via HTML (ouvre dans le navigateur pour impression)"""
+        try:
+            # ✅ Construire le contenu HTML
+            content_text = "\n".join(content)
+            
+            html_content = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>Ticket N°{num}</title>
+                <style>
+                    body {{
+                        font-family: 'Courier New', monospace;
+                        font-size: 11pt;
+                        padding: 20px;
+                        margin: 0;
+                        background: white;
+                        color: black;
+                        max-width: 380px;
+                        margin: 0 auto;
+                    }}
+                    pre {{
+                        font-family: 'Courier New', monospace;
+                        font-size: 11pt;
+                        white-space: pre-wrap;
+                        word-wrap: break-word;
+                        margin: 0;
+                        padding: 0;
+                    }}
+                    @media print {{
+                        body {{
+                            padding: 10px;
+                            margin: 0;
+                        }}
+                        .no-print {{
+                            display: none !important;
+                        }}
+                    }}
+                </style>
+            </head>
+            <body>
+                <pre>{content_text}</pre>
+                <div class="no-print" style="text-align:center; margin-top:20px; padding:10px; border-top:1px solid #ccc;">
+                    <p style="font-family:Arial; font-size:10px; color:#666;">
+                        Utilisez <strong>Ctrl+P</strong> ou <strong>Fichier > Imprimer</strong>
+                    </p>
+                </div>
+                <script>
+                    // ✅ Impression automatique après 1 seconde
+                    setTimeout(function() {{
+                        window.print();
+                    }}, 500);
+                    
+                    // ✅ Fermer la fenêtre après impression ou annulation
+                    window.onafterprint = function() {{
+                        setTimeout(function() {{
+                            window.close();
+                        }}, 500);
+                    }};
+                </script>
+            </body>
+            </html>
+            """
+            
+            # ✅ Créer un fichier temporaire
+            temp_file = tempfile.NamedTemporaryFile(
+                mode='w', 
+                suffix='.html', 
+                delete=False, 
+                encoding='utf-8'
+            )
+            temp_file.write(html_content)
+            temp_file.close()
+            
+            # ✅ Ouvrir dans le navigateur
+            webbrowser.open(temp_file.name)
+            
+            # ✅ Supprimer le fichier après 30 secondes
+            self.after(30000, lambda: self._supprimer_fichier_temp(temp_file.name))
+            
+            # ✅ Message d'information
+            messagebox.showinfo(
+                "Impression", 
+                "🖨️ Le ticket s'ouvre dans votre navigateur.\n\n"
+                "➡️ L'impression se lance automatiquement.\n"
+                "➡️ Si ce n'est pas le cas, utilisez Ctrl+P.",
+                parent=self
+            )
+            
+        except Exception as e:
+            messagebox.showerror("Erreur", f"Erreur d'impression: {str(e)}")
+
+    def _supprimer_fichier_temp(self, filepath):
+        """Supprime le fichier temporaire"""
+        try:
+            if os.path.exists(filepath):
+                os.unlink(filepath)
+        except:
+            pass
+
+    def _fermer_ticket(self, preview_window):
+        """Ferme la fenêtre du ticket et rend le focus à la caisse"""
+        preview_window.destroy()
+        # ✅ Redonner le focus à la fenêtre principale de la caisse
+        self.focus_force()
+        self.lift()
+        self.code_barre_entry.focus_set()
     
     def imprimer_ticket_rapide(self):
         if not self.lignes:
