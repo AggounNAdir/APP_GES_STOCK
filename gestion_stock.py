@@ -7117,7 +7117,10 @@ class BonDialog(tk.Toplevel):
                 bg=CLR_RED, fg="white", relief="flat",
                 font=("Segoe UI", 8, "bold"), padx=10, pady=4,
                 cursor="hand2", width=10).pack(side="left", padx=2)
-
+        tk.Button(btn_line1, text="💵 Modifier Prix", command=self.modifier_prix_produit,
+                bg=CLR_ACCENT, fg="white", relief="flat",
+                font=("Segoe UI", 8, "bold"), padx=10, pady=4,
+                cursor="hand2", width=10).pack(side="left", padx=2)
         tk.Button(btn_line1, text="✏ Modifier Qté", command=self.modifier_quantite,
                 bg=CLR_ORANGE, fg="white", relief="flat",
                 font=("Segoe UI", 8, "bold"), padx=10, pady=4,
@@ -7527,7 +7530,61 @@ class BonDialog(tk.Toplevel):
         tk.Button(btn_frame, text="❌ Annuler (Echap)", command=annuler_modification,
                 bg=CLR_RED, fg="white", relief="flat", font=("Segoe UI", 10, "bold"),
                 padx=20, pady=8, cursor="hand2").pack(side="left", padx=10, expand=True, fill="x")
+    
+    def modifier_prix_produit(self):
+        """Modifier le prix unitaire d'une ligne et recalculer total/TVA/TTC"""
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Avertissement", "Sélectionnez une ligne")
+            return
+        idx = int(sel[0])
+        ligne = self.lignes[idx]
 
+        nouveau_prix = simpledialog.askfloat(
+            "💵 Modifier le prix",
+            f"Produit: {ligne['designation']}\n"
+            f"Prix actuel: {ligne['prix']:.2f} DA\n\n"
+            f"Nouveau prix unitaire (DA):",
+            initialvalue=ligne['prix'],
+            minvalue=0.01,
+            parent=self
+        )
+        if nouveau_prix is None:
+            return
+        if nouveau_prix <= 0:
+            messagebox.showerror("Erreur", "Le prix doit être > 0")
+            return
+
+        # Mettre à jour le prix de base
+        ligne["prix"] = nouveau_prix
+
+        # Recalculer en tenant compte d'une éventuelle remise
+        remise = ligne.get("remise_produit", 0)
+        if remise > 0:
+            prix_remise = nouveau_prix * (1 - remise / 100)
+        else:
+            prix_remise = nouveau_prix
+
+        qte_base = ligne.get("quantite_base", ligne["quantite"])
+        total_ht_brut = qte_base * nouveau_prix
+        total_ht = qte_base * prix_remise
+
+        ligne["prix_remise"] = prix_remise
+        ligne["total_ht_brut"] = total_ht_brut
+        ligne["remise_montant"] = total_ht_brut - total_ht
+        ligne["total_ht"] = total_ht
+        ligne["total"] = total_ht
+
+        tva_taux = ligne.get("tva", 0)
+        ligne["total_tva"] = total_ht * tva_taux / 100
+        ligne["total_ttc"] = total_ht + ligne["total_tva"]
+
+        # ✅ Recalcule immédiatement le total du bon (HT/TVA/TTC)
+        self._refresh_tree()
+
+        messagebox.showinfo("Succès",
+            f"✅ Prix mis à jour: {nouveau_prix:.2f} DA\n"
+            f"Nouveau total ligne: {total_ht:,.2f} DA")
     def load_tiers_list(self):
         conn = get_conn()
         try:
@@ -8705,7 +8762,9 @@ class BonEditDialog(tk.Toplevel):
         tk.Button(action_frame, text="✏ Modifier ligne", command=self.edit_ligne,
                   bg=CLR_ORANGE, fg="white", relief="flat", font=("Segoe UI", 9, "bold"),
                   padx=12, pady=6, cursor="hand2").pack(side="left", padx=4)
-        
+        tk.Button(action_frame, text="💵 Modifier Prix", command=self.modifier_prix_ligne,
+                bg=CLR_ACCENT, fg="white", relief="flat", font=("Segoe UI", 9, "bold"),
+                padx=12, pady=6, cursor="hand2").pack(side="left", padx=4)
         tk.Button(action_frame, text="🗑 Supprimer ligne", command=self.remove_ligne,
                   bg=CLR_RED, fg="white", relief="flat", font=("Segoe UI", 9, "bold"),
                   padx=12, pady=6, cursor="hand2").pack(side="left", padx=4)
@@ -8719,7 +8778,40 @@ class BonEditDialog(tk.Toplevel):
                   bg=CLR_RED, fg="white", relief="flat", 
                   font=("Segoe UI", 10, "bold"),
                   padx=14, pady=6, cursor="hand2").pack(side="left", padx=4)
-    
+    def modifier_prix_ligne(self):
+        """Modifier le prix unitaire d'une ligne existante"""
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("Avertissement", "Sélectionnez une ligne")
+            return
+        idx = int(sel[0])
+        ligne = self.lignes[idx]
+
+        nouveau_prix = simpledialog.askfloat(
+            "💵 Modifier le prix",
+            f"Produit: {ligne['designation']}\n"
+            f"Prix actuel: {ligne['prix']:.2f} DA\n\n"
+            f"Nouveau prix unitaire (DA):",
+            initialvalue=ligne['prix'],
+            minvalue=0.01,
+            parent=self
+        )
+        if nouveau_prix is None:
+            return
+        if nouveau_prix <= 0:
+            messagebox.showerror("Erreur", "Le prix doit être > 0")
+            return
+
+        ligne["prix"] = nouveau_prix
+        ligne["total_ht"] = ligne["quantite"] * nouveau_prix   # quantite = quantité en unité de base ici
+        ligne["total"] = ligne["total_ht"]
+
+        tva_taux = ligne.get("tva", 0)
+        ligne["total_tva"] = ligne["total_ht"] * tva_taux / 100
+        ligne["total_ttc"] = ligne["total_ht"] + ligne["total_tva"]
+
+        self._refresh_tree()
+        messagebox.showinfo("Succès", f"✅ Prix mis à jour: {nouveau_prix:.2f} DA")
     def _charger_lignes(self):
         for ligne in self.lignes_originales:
             prod_info = None
