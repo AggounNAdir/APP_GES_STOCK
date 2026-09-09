@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+
 """
 Application de Gestion de Stock Complète
 Produits, Clients, Fournisseurs, Achats, Ventes, Versements, Retours, Factures
@@ -15,6 +14,7 @@ import random
 import string
 import json
 import csv
+import traceback
 import webbrowser
 import io
 import re
@@ -1155,111 +1155,180 @@ def get_conn():
 def calculer_pmp(conn, produit_id, nouvelle_quantite, nouveau_prix_achat,
                  stock_actuel_override=None, cout_actuel_override=None):
     """
-    Calcule le nouveau prix moyen pondéré.
-    Accepte les valeurs courantes en paramètre pour éviter
-    de relire un stock déjà modifié dans la même transaction.
+    ✅ AMÉLIORÉE : Calcule le nouveau PMP avec gestion des cas extrêmes
     """
     if stock_actuel_override is not None:
         stock_actuel = float(stock_actuel_override)
-        cout_actuel  = float(cout_actuel_override or 0)
+        cout_actuel = float(cout_actuel_override or 0)
     else:
         cursor = conn.execute(
-            "SELECT stock_actuel, cout_total_stock FROM produits WHERE id=?",
+            "SELECT stock_actuel, cout_total_stock, prix_moyen_pondere FROM produits WHERE id=?",
             (produit_id,)
         )
         produit = cursor.fetchone()
         if not produit:
             return nouveau_prix_achat, nouvelle_quantite * nouveau_prix_achat
         stock_actuel = float(produit["stock_actuel"] or 0)
-        cout_actuel  = float(produit["cout_total_stock"] or 0)
-
-    nouveau_cout_total  = cout_actuel + (nouvelle_quantite * nouveau_prix_achat)
-    nouveau_stock_total = stock_actuel + nouvelle_quantite
-
-    if nouveau_stock_total > 0:
-        nouveau_pmp = nouveau_cout_total / nouveau_stock_total
+        cout_actuel = float(produit["cout_total_stock"] or 0)
+    
+    # ✅ Si le stock actuel est 0, le nouveau PMP = prix d'achat
+    if stock_actuel <= 0:
+        nouveau_cout_total = nouvelle_quantite * nouveau_prix_achat
+        nouveau_stock_total = nouvelle_quantite
+        if nouveau_stock_total > 0:
+            nouveau_pmp = nouveau_cout_total / nouveau_stock_total
+        else:
+            nouveau_pmp = nouveau_prix_achat
     else:
-        nouveau_pmp = nouveau_prix_achat
-
+        nouveau_cout_total = cout_actuel + (nouvelle_quantite * nouveau_prix_achat)
+        nouveau_stock_total = stock_actuel + nouvelle_quantite
+        
+        if nouveau_stock_total > 0:
+            nouveau_pmp = nouveau_cout_total / nouveau_stock_total
+        else:
+            nouveau_pmp = nouveau_prix_achat
+    
     return nouveau_pmp, nouveau_cout_total
 
 def recalculer_cout_stock_apres_sortie(conn, produit_id, quantite_sortie):
+    """✅ CORRECTION : Recalcule le coût du stock après une sortie"""
     produit = conn.execute(
         "SELECT stock_actuel, cout_total_stock, prix_moyen_pondere FROM produits WHERE id=?",
         (produit_id,)
     ).fetchone()
-    pmp          = produit["prix_moyen_pondere"] or 0
-    cout_actuel  = produit["cout_total_stock"]   or 0
-    reduction    = quantite_sortie * pmp
+    
+    if not produit:
+        return
+    
+    stock_actuel = produit["stock_actuel"] or 0
+    cout_actuel = produit["cout_total_stock"] or 0
+    pmp = produit["prix_moyen_pondere"] or 0
+    
+    # ✅ Si PMP = 0 mais stock > 0, recalculer
+    if pmp <= 0 and stock_actuel > 0:
+        pmp = cout_actuel / stock_actuel
+    
+    # ✅ Sortie au PMP
+    reduction = quantite_sortie * pmp
     nouveau_cout = max(0.0, cout_actuel - reduction)
+    nouveau_stock = max(0.0, stock_actuel - quantite_sortie)
+    
+    if nouveau_stock > 0:
+        nouveau_pmp = nouveau_cout / nouveau_stock
+    else:
+        nouveau_pmp = 0
+    
     conn.execute(
-        "UPDATE produits SET cout_total_stock = ? WHERE id=?",
-        (nouveau_cout, produit_id)
+        "UPDATE produits SET stock_actuel = ?, prix_moyen_pondere = ?, cout_total_stock = ? WHERE id=?",
+        (nouveau_stock, nouveau_pmp, nouveau_cout, produit_id)
     )
 def entree_stock_annulation_vente(conn, produit_id, quantite):
     """
     Réintègre du stock suite à l'annulation/suppression d'une vente,
-    ou à un retour client. Utilise le PMP ACTUEL du produit (pas le prix de vente),
-    car on réintègre une marchandise dont le coût réel est le PMP en vigueur.
+    ou à un retour client.
+    ✅ CORRECTION : Utiliser le PMP actuel pour réintégrer au bon coût
     """
     produit = conn.execute(
-        "SELECT prix_moyen_pondere, prix_achat FROM produits WHERE id=?",
+        "SELECT stock_actuel, cout_total_stock, prix_moyen_pondere FROM produits WHERE id=?",
         (produit_id,)
     ).fetchone()
-    pmp = produit["prix_moyen_pondere"] or produit["prix_achat"] or 0
-    nouveau_pmp, nouveau_cout = calculer_pmp(conn, produit_id, quantite, pmp)
+    
+    if not produit:
+        return
+    
+    stock_actuel = produit["stock_actuel"] or 0
+    cout_actuel = produit["cout_total_stock"] or 0
+    pmp_actuel = produit["prix_moyen_pondere"] or 0
+    
+    # ✅ CORRECTION : Si PMP = 0, utiliser le prix d'achat moyen
+    if pmp_actuel <= 0 and stock_actuel > 0:
+        pmp_actuel = cout_actuel / stock_actuel
+    
+    # ✅ Si pas de PMP et pas de stock, utiliser 0
+    if pmp_actuel <= 0:
+        pmp_actuel = 0
+    
+    # ✅ Réintégrer au PMP actuel (coût réel du stock)
+    nouveau_stock = stock_actuel + quantite
+    nouveau_cout = cout_actuel + (quantite * pmp_actuel)
+    
+    if nouveau_stock > 0:
+        nouveau_pmp = nouveau_cout / nouveau_stock
+    else:
+        nouveau_pmp = 0
+    
     conn.execute(
-        "UPDATE produits SET stock_actuel = stock_actuel + ?, "
-        "prix_moyen_pondere = ?, cout_total_stock = ? WHERE id=?",
-        (quantite, nouveau_pmp, nouveau_cout, produit_id)
-    )    
+        "UPDATE produits SET stock_actuel = ?, prix_moyen_pondere = ?, cout_total_stock = ? WHERE id=?",
+        (nouveau_stock, nouveau_pmp, nouveau_cout, produit_id)
+    )
 def recalculer_pmp_apres_sortie_complete(conn, produit_id):
     """
-    Après toute sortie de stock (retour achat, annulation…),
-    recalcule le PMP ou le met à 0 si le stock est épuisé.
-    À appeler APRÈS avoir mis à jour stock_actuel et cout_total_stock.
+    ✅ CORRECTION : Recalcule le PMP après une sortie complète
     """
     produit = conn.execute(
         "SELECT stock_actuel, cout_total_stock FROM produits WHERE id=?",
         (produit_id,)
     ).fetchone()
- 
-    if produit["stock_actuel"] > 0:
-        nouveau_pmp = produit["cout_total_stock"] / produit["stock_actuel"]
+    
+    if not produit:
+        return
+    
+    stock_actuel = produit["stock_actuel"] or 0
+    cout_actuel = produit["cout_total_stock"] or 0
+    
+    if stock_actuel > 0 and cout_actuel > 0:
+        nouveau_pmp = cout_actuel / stock_actuel
     else:
-        nouveau_pmp = 0.0
-        # Remettre à zéro le coût total si stock nul
-        conn.execute(
-            "UPDATE produits SET cout_total_stock = 0 WHERE id=?", (produit_id,)
-        )
- 
+        nouveau_pmp = 0
+        if stock_actuel == 0:
+            conn.execute(
+                "UPDATE produits SET cout_total_stock = 0 WHERE id=?",
+                (produit_id,)
+            )
+    
     conn.execute(
         "UPDATE produits SET prix_moyen_pondere = ? WHERE id=?",
         (nouveau_pmp, produit_id)
     )
 def inverser_stock_achat(conn, lignes):
-    """Annule l'effet stock/PMP d'un bon d'achat (suppression ou annulation)."""
+    """✅ CORRECTION : Annule l'effet stock/PMP d'un bon d'achat"""
     for l in lignes:
-        recalculer_cout_stock_apres_sortie(conn, l["produit_id"], l["quantite"])
-        conn.execute(
-            "UPDATE produits SET stock_actuel = stock_actuel - ? WHERE id=?",
-            (l["quantite"], l["produit_id"])
-        )
+        # Récupérer l'état actuel du stock
         produit = conn.execute(
             "SELECT stock_actuel, cout_total_stock FROM produits WHERE id=?",
             (l["produit_id"],)
         ).fetchone()
-        if produit["stock_actuel"] > 0:
-            nouveau_pmp = produit["cout_total_stock"] / produit["stock_actuel"]
-            conn.execute(
-                "UPDATE produits SET prix_moyen_pondere = ? WHERE id=?",
-                (nouveau_pmp, l["produit_id"])
-            )
+        
+        if not produit:
+            continue
+        
+        stock_actuel = produit["stock_actuel"] or 0
+        cout_actuel = produit["cout_total_stock"] or 0
+        
+        # ✅ Sortie du stock (annulation de l'entrée)
+        nouvelle_quantite = max(0.0, stock_actuel - l["quantite"])
+        
+        # ✅ Recalcul du coût proportionnellement
+        if stock_actuel > 0 and cout_actuel > 0:
+            # Retirer la part proportionnelle du coût
+            proportion = l["quantite"] / stock_actuel
+            if proportion > 1:
+                proportion = 1
+            nouveau_cout = cout_actuel * (1 - proportion)
         else:
-            conn.execute(
-                "UPDATE produits SET prix_moyen_pondere = 0, cout_total_stock = 0 WHERE id=?",
-                (l["produit_id"],)
-            )
+            nouveau_cout = 0
+        
+        # ✅ Mettre à jour le produit
+        if nouvelle_quantite > 0 and nouveau_cout > 0:
+            nouveau_pmp = nouveau_cout / nouvelle_quantite
+        else:
+            nouveau_pmp = 0
+            nouveau_cout = 0
+        
+        conn.execute(
+            "UPDATE produits SET stock_actuel = ?, prix_moyen_pondere = ?, cout_total_stock = ? WHERE id=?",
+            (nouvelle_quantite, nouveau_pmp, nouveau_cout, l["produit_id"])
+        )
 
 class PrixSpeciauxClientDialog(tk.Toplevel):
     """Dialogue pour gérer les prix spéciaux d'un client spécifique"""
@@ -6201,10 +6270,11 @@ class BonAchatPage(tk.Frame):
                 self.fournisseur_filter_var.set("Tous")
         except Exception as e:
             logging.error(f"❌ Erreur load_fournisseurs_list: {e}")
-            logging.error(traceback.format_exc())
+            
             if self.fournisseur_filter_combo:
                 self.fournisseur_filter_combo['values'] = ["Tous"]
                 self.fournisseur_filter_var.set("Tous")
+
 
     def refresh(self):
         q = self.sv.get().lower()
@@ -6219,6 +6289,7 @@ class BonAchatPage(tk.Frame):
         conn = get_conn()
         
         try:
+            # ✅ REQUÊTE PRINCIPALE : Récupérer TOUS les bons (y compris SI-F-)
             if fournisseur_filter != "Tous":
                 rows = conn.execute("""
                     SELECT 
@@ -6229,6 +6300,8 @@ class BonAchatPage(tk.Frame):
                         f.nom as fnom,
                         b.total as total_ttc,
                         b.statut,
+                        b.ancien_solde,
+                        b.nouveau_solde,
                         (SELECT COALESCE(SUM(la.quantite / p.facteur_conversion), 0)
                         FROM lignes_achat la 
                         JOIN produits p ON la.produit_id = p.id 
@@ -6248,6 +6321,8 @@ class BonAchatPage(tk.Frame):
                         f.nom as fnom,
                         b.total as total_ttc,
                         b.statut,
+                        b.ancien_solde,
+                        b.nouveau_solde,
                         (SELECT COALESCE(SUM(la.quantite / p.facteur_conversion), 0)
                         FROM lignes_achat la 
                         JOIN produits p ON la.produit_id = p.id 
@@ -6267,55 +6342,55 @@ class BonAchatPage(tk.Frame):
         total_ttc_global = 0
 
         for r in rows:
-            if q in r["numero"].lower() or q in r["fnom"].lower():
-                # ✅ RÉCUPÉRER LES LIGNES AVEC UNE NOUVELLE CONNEXION
-                conn2 = get_conn()
-                try:
-                    lignes_bon = conn2.execute("""
-                        SELECT 
-                            COALESCE(total_ht, 0) as ht,
-                            COALESCE(total_ttc, 0) as ttc,
-                            COALESCE(tva_taux, 19) as tva,
-                            COALESCE(total, 0) as total
-                        FROM lignes_achat 
-                        WHERE bon_id = ?
-                    """, (r["id"],)).fetchall()
-                except Exception as e:
-                    logging.error(f"❌ Erreur récupération lignes bon {r['id']}: {e}")
-                    conn2.close()
-                    continue
-                
+            # ✅ RECHERCHE TEXTUELLE (numéro + fournisseur)
+            if q and q not in r["numero"].lower() and q not in r["fnom"].lower():
+                continue
+            
+            # ✅ RÉCUPÉRER LES LIGNES DU BON AVEC UNE NOUVELLE CONNEXION
+            conn2 = get_conn()
+            try:
+                lignes_bon = conn2.execute("""
+                    SELECT 
+                        COALESCE(total_ht, 0) as ht,
+                        COALESCE(total_ttc, 0) as ttc,
+                        COALESCE(tva_taux, 19) as tva,
+                        COALESCE(total, 0) as total
+                    FROM lignes_achat 
+                    WHERE bon_id = ?
+                """, (r["id"],)).fetchall()
+            except Exception as e:
+                logging.error(f"❌ Erreur récupération lignes bon {r['id']}: {e}")
                 conn2.close()
-                
-                ht_bon = 0
-                ttc_bon = 0
-                
+                continue
+            
+            conn2.close()
+            
+            ht_bon = 0
+            ttc_bon = 0
+            
+            # ✅ SI LE BON N'A PAS DE LIGNES (ex: solde initial), on utilise total_ttc
+            if not lignes_bon:
+                # Utiliser le total du bon (souvent dans b.total)
+                try:
+                    ttc_bon = float(r["total_ttc"] or 0)
+                    ht_bon = ttc_bon  # Pour les soldes initiaux, on considère HT = TTC
+                except Exception as e:
+                    logging.warning(f"⚠️ Erreur conversion total bon: {e}")
+                    ttc_bon = 0
+                    ht_bon = 0
+            else:
+                # ✅ CALCUL À PARTIR DES LIGNES
                 for lg in lignes_bon:
                     try:
-                        # ✅ CONVERSION SÉCURISÉE
-                        ht_val = lg["ht"]
-                        ttc_val = lg["ttc"]
-                        tva_val = lg["tva"]
-                        total_val = lg["total"]
+                        # Conversion sécurisée
+                        ht_val = float(str(lg["ht"]).replace(',', '.')) if lg["ht"] not in (None, '') else 0
+                        ttc_val = float(str(lg["ttc"]).replace(',', '.')) if lg["ttc"] not in (None, '') else 0
+                        tva_val = float(str(lg["tva"]).replace(',', '.')) if lg["tva"] not in (None, '') else 19
+                        total_val = float(str(lg["total"]).replace(',', '.')) if lg["total"] not in (None, '') else 0
                         
-                        # ✅ NETTOYER ET CONVERTIR
-                        if ht_val is None or str(ht_val).strip() == '':
-                            ht_val = 0
-                        else:
-                            ht_val = float(str(ht_val).replace(',', '.'))
-                        
-                        if ttc_val is None or str(ttc_val).strip() == '':
-                            if tva_val is None or str(tva_val).strip() == '':
-                                tva_val = 19
-                            else:
-                                tva_val = float(str(tva_val).replace(',', '.'))
-                            
-                            if total_val is None or str(total_val).strip() == '':
-                                ttc_val = ht_val * (1 + tva_val / 100.0)
-                            else:
-                                ttc_val = float(str(total_val).replace(',', '.'))
-                        else:
-                            ttc_val = float(str(ttc_val).replace(',', '.'))
+                        # Si TTC manquant, le recalculer
+                        if ttc_val == 0 and ht_val > 0:
+                            ttc_val = ht_val * (1 + tva_val / 100)
                         
                         ht_bon += ht_val
                         ttc_bon += ttc_val
@@ -6323,46 +6398,54 @@ class BonAchatPage(tk.Frame):
                     except Exception as e:
                         logging.warning(f"⚠️ Erreur traitement ligne: {e}")
                         continue
-                
-                # ✅ SI PAS DE LIGNES, UTILISER LE TOTAL DU BON
-                if ttc_bon == 0 and ht_bon == 0:
-                    try:
-                        total_bon = r["total_ttc"]
-                        if total_bon is None or str(total_bon).strip() == '':
-                            ttc_bon = 0
-                            ht_bon = 0
-                        else:
-                            ttc_bon = float(str(total_bon).replace(',', '.'))
-                            ht_bon = ttc_bon
-                    except Exception as e:
-                        logging.warning(f"⚠️ Erreur conversion total bon: {e}")
-                        ttc_bon = 0
-                        ht_bon = 0
-
-                total_ht_global += ht_bon
-                total_ttc_global += ttc_bon
-                
-                cartons = r['total_cartons'] or 0
-                cartons_text = f"{cartons:.2f} cartons" if cartons > 0 else "-"
-
+            
+            # ✅ SI APRÈS TOUT, LE TTC EST ENCORE À 0, UTILISER LA VALEUR GLOBALE DU BON
+            if ttc_bon == 0 and ht_bon == 0:
                 try:
-                    self.tree.insert("", "end", iid=r["id"], values=(
-                        r["numero"], 
-                        r["date_bon"],
-                        r["date_livraison"] or "-", 
-                        r["fnom"],
-                        f"{ht_bon:,.2f}", 
-                        f"{ttc_bon:,.2f}",
-                        r["statut"], 
-                        f"{ttc_bon:,.2f}",
-                        cartons_text
-                    ))
+                    ttc_bon = float(r["total_ttc"] or 0)
+                    ht_bon = ttc_bon
                 except Exception as e:
-                    logging.error(f"❌ Erreur insertion dans treeview: {e}")
+                    logging.warning(f"⚠️ Erreur conversion total bon (fallback): {e}")
+                    ttc_bon = 0
+                    ht_bon = 0
 
+            total_ht_global += ht_bon
+            total_ttc_global += ttc_bon
+            
+            cartons = r['total_cartons'] or 0
+            cartons_text = f"{cartons:.2f} cartons" if cartons > 0 else "-"
+            
+            # ✅ DÉTERMINER SI C'EST UN SOLDE INITIAL POUR L'AFFICHAGE
+            if r["numero"].startswith("SI-F-"):
+                statut_affichage = "SOLDE INITIAL"
+                tag = ("solde_initial",)
+            else:
+                statut_affichage = r["statut"]
+                tag = None
+            
+            try:
+                self.tree.insert("", "end", iid=r["id"], values=(
+                    r["numero"], 
+                    r["date_bon"],
+                    r["date_livraison"] or "-", 
+                    r["fnom"],
+                    f"{ht_bon:,.2f}", 
+                    f"{ttc_bon:,.2f}",
+                    statut_affichage, 
+                    f"{ttc_bon:,.2f}",
+                    cartons_text
+                ), tags=tag if tag else ())
+            except Exception as e:
+                logging.error(f"❌ Erreur insertion dans treeview: {e}")
+
+        # ✅ METTRE À JOUR LES TOTAUX GLOBAUX
         self.total_ht_global.set(f"{total_ht_global:,.2f} DA")
         self.total_ttc_global.set(f"{total_ttc_global:,.2f} DA")
         self.situation_ttc_global.set(f"{total_ttc_global:,.2f} DA")
+
+        # ✅ CONFIGURER LE TAG "solde_initial"
+        self.tree.tag_configure("solde_initial", foreground=CLR_PURPLE, font=("Segoe UI", 9, "bold"))
+
         logging.info("✅ refresh() terminé")
     def _afficher_erreur(self, error):
         """Affiche une erreur dans la page"""
@@ -7480,11 +7563,7 @@ class VenteComptoirDialog(tk.Toplevel):
                 )
                 # ✅ CORRECTION : réduire le coût du stock (PMP conservé, cout_total_stock ajusté)
                 recalculer_cout_stock_apres_sortie(conn, l["produit_id"], qty_base)
-                conn.execute(
-                    "UPDATE produits SET stock_actuel = stock_actuel - ? WHERE id=?",
-                    (qty_base, l["produit_id"])
-                )
-            
+               
             if client_nom != "COMPTOIR":
                 conn.execute(
                     "UPDATE clients SET solde = solde + ? WHERE id=?", (total, client_id)
@@ -9356,8 +9435,7 @@ class BonDialog(tk.Toplevel):
                     
                     # ✅ CORRECTION : réduire le coût du stock AVANT de réduire le stock
                     recalculer_cout_stock_apres_sortie(conn, l["produit_id"], quantite_vente)
-                    conn.execute("UPDATE produits SET stock_actuel = stock_actuel - ? WHERE id=?",
-                                (quantite_vente, l["produit_id"]))
+                    
                 
                 # ✅ Mise à jour du solde client
                 conn.execute("UPDATE clients SET solde = solde + ? WHERE id=?", (total_ht, tiers_id))
@@ -10011,10 +10089,7 @@ class BonEditDialog(tk.Toplevel):
                     ).fetchall()
                     for l in anciennes_lignes:
                         recalculer_cout_stock_apres_sortie(conn, l["produit_id"], l["quantite"])
-                        conn.execute(
-                            "UPDATE produits SET stock_actuel = stock_actuel - ? WHERE id=?",
-                            (l["quantite"], l["produit_id"])
-                        )
+                       
                         produit = conn.execute(
                             "SELECT stock_actuel, cout_total_stock FROM produits WHERE id=?",
                             (l["produit_id"],)
@@ -10133,10 +10208,7 @@ class BonEditDialog(tk.Toplevel):
                     # ✅ CORRECTION : sortie de stock avec ajustement du cout_total_stock
                     # AVANT de décrémenter stock_actuel (sinon cout_total_stock ne bouge jamais)
                     recalculer_cout_stock_apres_sortie(conn, l["produit_id"], l["quantite"])
-                    conn.execute(
-                        "UPDATE produits SET stock_actuel = stock_actuel - ? WHERE id=?",
-                        (l["quantite"], l["produit_id"])
-                    )
+                   
                 conn.execute(
                     "UPDATE clients SET solde = solde + ? WHERE id=?", (total, tiers_id)
                 )
@@ -11429,10 +11501,7 @@ class RetourPage(tk.Frame):
                     # ✅ CORRECTION : supprimer un retour vente = annuler ce retour
                     # Le retour avait remis les articles EN stock → on les ressort
                     recalculer_cout_stock_apres_sortie(conn, l["produit_id"], l["quantite"])
-                    conn.execute(
-                        "UPDATE produits SET stock_actuel = stock_actuel - ? WHERE id=?",
-                        (l["quantite"], l["produit_id"])
-                    )
+                    
                     # Recalculer le PMP après la sortie
                     produit = conn.execute(
                         "SELECT stock_actuel, cout_total_stock FROM produits WHERE id=?",
